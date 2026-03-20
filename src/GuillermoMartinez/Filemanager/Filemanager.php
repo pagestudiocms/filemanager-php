@@ -1,5 +1,6 @@
 <?php
 namespace GuillermoMartinez\Filemanager;
+
 use Symfony\Component\Finder\Finder;
 use Symfony\Component\Finder\SplFileInfo;
 use Symfony\Component\HttpFoundation\Request;
@@ -11,6 +12,7 @@ use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\Filesystem\Filesystem;
 use Gregwar\Image\Image as Imagen;
 use Symfony\Component\HttpFoundation\ResponseHeaderBag;
+use GuillermoMartinez\Filemanager\Repository\FileRepository;
 
 class Filemanager
 {
@@ -20,6 +22,13 @@ class Filemanager
      * @var [array]
      */
     private $config;
+
+    /**
+     * StorageService instance
+     */
+    private $storage;
+
+    private $repository;
 
     /**
      * actions = getfolder|uploadfile|newfolder|renamefile|deletefile|download
@@ -83,7 +92,7 @@ class Filemanager
      *
      * @param array $extra overwrites settings
      */
-    public function __construct($extra=array()){
+    public function __construct($extra=array()) {
         $this->config = array(
             "doc_root" => "",
             "url" => "/",
@@ -101,28 +110,60 @@ class Filemanager
                 "resize" => array(
                     // width,height,IF TRUE crop in width ELSEIF NULL is auto,IF TRUE crop in height ELSEIF NULL is auto
                     'small' => array(120,90,true,true),
-                    ),
-                "quality" => 100,
                 ),
+                "quality" => 100,
+            ),
             "type_file" => null,
             "folder_excludes" => array(),
             "folder_thumb" => '_thumbs',
-            );
+        );
+        
         if(isset($_SERVER['DOCUMENT_ROOT'])) $this->config['doc_root'] = $_SERVER['DOCUMENT_ROOT'];
         if(count($extra)>0) $this->setup($extra);
-        if($this->config['type_file']=='images'){
-            $this->config['ext'] = $this->config['images']['images_ext'];
-        }
+        
         if($this->config['debug']){
             $this->log = new Logger('filemanager');
             $this->log->pushHandler(new StreamHandler($this->config['debugfile']));
             $this->init = microtime();
             $this->_log(__METHOD__." - BEGIN FILEMANAGER");
         }
+
+        // Instantiate StorageService if storage config provided
+        if (isset($this->config['storage']) && is_array($this->config['storage'])) {
+            try {
+                $this->storage = new \GuillermoMartinez\Filemanager\Service\StorageService($this->config['storage']);
+            } catch (\Throwable $e) {
+                if($this->config['debug']) $this->_log(__METHOD__.' - Failed to instantiate StorageService: '.$e->getMessage());
+                $this->storage = null;
+            }
+        }
+
+        // Ensure ImageService is available via config['images']['service']
+        if (isset($this->config['images']) && is_array($this->config['images'])) {
+            if (!isset($this->config['images']['service']) || !is_object($this->config['images']['service'])) {
+                try {
+                    $this->config['images']['service'] = new \GuillermoMartinez\Filemanager\Service\ImageService($this->config['images']);
+                } catch (\Throwable $e) {
+                    if($this->config['debug']) $this->_log(__METHOD__.' - Failed to instantiate ImageService: '.$e->getMessage());
+                }
+            }
+        }
+
+        // Instantiate repository facade
+        try {
+            $this->repository = new FileRepository($this->config, $this->storage, $this->config['images']['service'], $this->log);
+        } catch (\Throwable $e) {
+            if($this->config['debug']) $this->_log(__METHOD__.' - Failed to instantiate FileRepository: '.$e->getMessage());
+            $this->repository = null;
+        }
+
+        if($this->config['type_file']=='images') {
+            $this->config['ext'] = $this->config['images']['images_ext'];
+        }
     }
 
     /**
-     * Devuelve la diferencia de tiempo formateada
+     * Returns the formatted time difference for logging
      * @return string
      */
     private function getLogTime()
@@ -135,9 +176,9 @@ class Filemanager
     }
 
     /**
-     * Diferencia de microtime
-     * @param  string $start inicio
-     * @param  microtime $end   fin
+     * Microtime difference
+     * @param  string $start start time
+     * @param  string|null $end   end time (optional)
      * @return float
      */
     private function microtime_diff($start, $end = null)
@@ -152,9 +193,9 @@ class Filemanager
         return floatval($diff_sec) + $diff_usec;
     }
     /**
-     * Cambia las configuraciones
+     * Merge configuration overrides
      *
-     * @param array $extra Configuraciones a modificar
+     * @param array $extra Configuration values to merge
      * @return void
     */
     private function setup($extra){
@@ -162,7 +203,7 @@ class Filemanager
     }
 
     /**
-     * Obtiene la ruta absoluta
+     * Get the absolute storage path
      *
      * @return string
     */
@@ -174,7 +215,7 @@ class Filemanager
     }
 
     /**
-     * Valida la url path solo formato /directorio/ o /file.txt
+     * Validate the URL path (only formats like /directory/ or /file.txt)
      * @param string $path
      * @return boolean
      */
@@ -187,8 +228,9 @@ class Filemanager
     }
 
     /**
-     * Valida nombre de archivo
+     * Validate a file name
      * @param string $filename
+     * @param bool $ext Whether to validate extension
      * @return boolean
      */
     public function validNameFile($filename,$ext=true){
@@ -202,7 +244,7 @@ class Filemanager
     }
 
     /**
-     * Valida extension de archivos
+     * Validate a file extension against configured allowed extensions
      * @param string $filename
      * @return boolean
      */
@@ -219,7 +261,7 @@ class Filemanager
     }
 
     /**
-     * Agrega mensaje a cada peticion si se produce un error
+     * Add a message to the response data (used for errors or info)
      * @param array $data
      * @return void
      */
@@ -231,9 +273,9 @@ class Filemanager
     }
 
     /**
-     * Si debug active permite logear informacion
-     * @param string $string Texto a mostrar
-     * @param string $type Tipo de mensaje
+     * Log a message when debugging is enabled
+     * @param string $string Text to log
+     * @param string $type Message level/type
      * @return void
      */
     public function _log($string,$type='info') {
@@ -244,7 +286,7 @@ class Filemanager
     }
 
     /**
-     * Clear var
+     * Sanitize a string value
      * @param string $var
      * @return string
      */
@@ -258,8 +300,9 @@ class Filemanager
     }
 
     /**
-     * Clear name folder
+     * Sanitize a folder name
      * @param string $var
+     * @param bool $strict If true, remove trailing slash
      * @return string
      */
     private function sanitizeNameFolder($var,$strict=false) {
@@ -273,7 +316,7 @@ class Filemanager
     }
 
     /**
-     * Remove extension
+     * Remove file extension from a filename
      * @param string $filename
      * @return string
      */
@@ -283,7 +326,7 @@ class Filemanager
     }
 
     /**
-     * Obtiene la extensión de un nombre de archivo
+     * Get the extension from a file name
      * @param string $nameFile
      * @return string
      */
@@ -294,7 +337,7 @@ class Filemanager
     }
 
     /**
-     * Obtiene el tamaño maximo permitido por el servidor
+     * Get the server's maximum allowed upload file size (MB)
      * @return int
      */
     public function getMaxUploadFileSize() {
@@ -307,7 +350,7 @@ class Filemanager
     }
 
     /**
-     * Limpia el nombre de archivo
+     * Clean and normalize a file name
      * @param string $namefile
      * @return string
      */
@@ -324,11 +367,11 @@ class Filemanager
     }
 
     /**
-    * Todas las propiedades de un archivo o directorio
+    * All properties of a file or directory
     *
     * @param SplFileInfo $file Object of SplFileInfo
-    * @param string $path Ruta de la carpeta o archivo
-    * @return array|null Lista de propiedades o null si no es leible
+    * @param string $path Path of the folder or file
+    * @return array|null List of properties or null if not readable
     */
     public function fileInfo($file,$path){
         if($file->isReadable()){
@@ -351,9 +394,9 @@ class Filemanager
     }
 
     /**
-     * Informacion del directorio
+     * Directory information
      * @param  UploadedFile $file
-     * @param  string $path ruta relativa
+     * @param  string $path relative path
      * @return array
      */
     public function dirInfo($file,$path){
@@ -374,9 +417,9 @@ class Filemanager
     }
 
     /**
-     * Informacion de la primera miniatura
+     * Information for the first thumbnail
      * @param  UploadedFile $file
-     * @param  string $path ruta relativa
+     * @param  string $path relative path
      * @return string
      */
     public function firstThumb($file,$path){
@@ -396,7 +439,7 @@ class Filemanager
     }
 
     /**
-     * Validate image
+     * Validate whether given file is an image based on extension
      * @param  UploadedFile  $file
      * @return boolean
      */
@@ -409,10 +452,10 @@ class Filemanager
     }
 
     /**
-     * Crea la miniatura de imagenes
+     * Create thumbnails for an image
      * @param UploadedFile $file
      * @param string $path
-     * @return string Nombre del nuevo archivo
+     * @return string Name of the created thumbnail file
      */
     public function createThumb($file,$path){
         $ext = $file->getExtension();
@@ -438,15 +481,25 @@ class Filemanager
     }
 
     /**
-     * redimensiona una imagen
-     * @param  string $path_imagen     ruta de imagen origen
-     * @param  string $path_imagen_new ruta de imagen nueva
-     * @param  array  $image_info      info de imagen
-     * @param  array  $image_config    dimensiones de imagenes
+     * Resize an image
+     * @param  string $path_imagen     source image path
+     * @param  string $path_imagen_new destination image path
+     * @param  array  $image_info      image info array
+     * @param  array  $image_config    image size configuration
      * @return boolean
      */
     public function resizeImage($path_imagen,$path_imagen_new,$image_info=array(),$image_config=array())
     {
+        // Delegate to ImageService if provided
+        if (isset($this->config['images']['service']) && is_object($this->config['images']['service'])) {
+            try {
+                return $this->config['images']['service']->resize($path_imagen, $path_imagen_new, $image_info, $image_config, $this->config['images']['quality'] ?? null);
+            } catch (\Throwable $e) {
+                if($this->config['debug']) $this->_log(__METHOD__.' - ImageService resize error: '.$e->getMessage());
+                return false;
+            }
+        }
+        // Fallback to previous implementation
         $imagen_ext = $this->getExtension($path_imagen);
         if ($image_config[2]===true && $image_config[3]===true) {
             Imagen::open($path_imagen)->zoomCrop($image_info['width'],$image_info['height'])->save($path_imagen_new,$imagen_ext,$this->config['images']['quality']);
@@ -463,10 +516,10 @@ class Filemanager
     }
 
     /**
-     * Devuelva el nuevo nombre y dimesion de imagen
-     * @param  string $path         ruta relativa
-     * @param  string $imagen       nombre de imagen
-     * @param  array $image_config dimensiones de imagenes
+     * Return the new image name and dimensions
+     * @param  string $path         relative path
+     * @param  string $imagen       image filename
+     * @param  array $image_config image size configuration
      * @return array
      */
     public function imageSizeName($path,$imagen,$image_config)
@@ -498,10 +551,10 @@ class Filemanager
     }
 
     /**
-     * Calcula las dimensiones de la imagen
-     * @param  array  $imagesize    dimension de la imagen
-     * @param  array  $image_config dimensiones de la imagen
-     * @return array               dimension de la nueva imagen
+     * Calculate target image dimensions based on configuration
+     * @param  array  $imagesize    original image dimensions
+     * @param  array  $image_config image configuration
+     * @return array               new image dimensions
      */
     public function getImageCalSize($imagesize=array(),$image_config=array())
     {
@@ -526,68 +579,20 @@ class Filemanager
     }
 
     /**
-    * Lista carpeta y archivos segun el path ingresado, no recursivo, ordenado por tipo y nombre
+    * List folder and files for the given path (non-recursive), ordered by type and name
     *
-    * @param string $path Ruta de la carpeta o archivo
-    * @return array|null Listado de archivos o null si no existe
+    * @param string $path Path of the folder or file
+    * @return array|null List of files or null if not found
     */
     public function getAllFiles($path){
-        $fullpath = $this->getFullPath().$path;
-        if(file_exists($fullpath)){
-            $file = new \SplFileInfo($fullpath);
-            if($file->isDir()){
-                $r = array();
-                // if($path != "/") $r[] = $this->folderParent($path);
-                $finder = new Finder();
-                $directories = $finder->notName($this->config['folder_thumb']);
-                if (count($this->config['folder_excludes'])>0) {
-                    foreach ($this->config['folder_excludes'] as $value) {
-                        $directories = $finder->notName($value);
-                    }
-                }
-                //$directories = $directories->notName('web.config')->notName('.htaccess')->depth(0)->sortByType();
-                $directories = $directories->notName('web.config')->notName('.htaccess')->depth(0)->sort(
-                    function ($a, $b) {return $b->getMTime() - $a->getMTime();}
-                    );
-                // $directories = $directories->files()->name('*.jpg');
-                $directories = $directories->in($fullpath);
-                foreach ($directories as $key => $directorie) {
-                    $namefile = $directorie->getFilename();
-                    if($directorie->isDir() && $this->validNameFile($namefile,false)){
-                        $t = $this->dirInfo($directorie,$path);
-                        if($t) $r[] = $t;
-                    }elseif($directorie->isFile() && $this->validNameFile($namefile)){
-                        $t = $this->fileInfo($directorie,$path);
-                        if($t) $r[] = $t;
-                    }
-                }
-                return $r;
-            }elseif($file->isFile()){
-                $t = $this->fileInfo($file,$path);
-                if($t){
-                    return $t;
-                }else{
-                    $result = array("query"=>"BE_GETFILEALL_NOT_LEIBLE","params"=>array());
-                    $this->setInfo(array("msg"=>$result));
-                    if( $this->config['debug'] ) $this->_log(__METHOD__." - Archivo no leible - $fullpath");
-                    return;
-                }
-            }elseif($file->isLink()){
-                $result = array("query"=>"BE_GETFILEALL_NOT_PERMITIDO","params"=>array());
-                $this->setInfo(array("msg"=>$result));
-                if( $this->config['debug'] ) $this->_log(__METHOD__." - path desconocido - $fullpath");
-                return ;
-            }
-        }else{
-            $result = array("query"=>"BE_GETFILEALL_NOT_EXISTED","params"=>array());
-            $this->setInfo(array("msg"=>$result));
-            if( $this->config['debug'] ) $this->_log(__METHOD__." - No existe el archivo - $fullpath");
-            return ;
+        if ($this->repository) {
+            return $this->repository->getAllFiles($path);
         }
+        return null;
     }
 
     /**
-     * Mueve un arcivo subido
+     * Move an uploaded file into storage
      * @param UploadedFile $file
      * @param string $path
      * @return SplFileInfo|null
@@ -644,6 +649,7 @@ class Filemanager
      * @return array|null
      */
     public function uploadAll($files,$path){
+        // fallback to legacy behaviour
         if( is_array($files) && count($files) > 0 ){
             $n = count($files);
             if( $n <= $this->config['upload']['number'] ){
@@ -689,12 +695,15 @@ class Filemanager
     }
 
     /**
-     * Renombra una carpeta
+     * Create or rename a folder
      * @param string $namefile
      * @param string $path
      * @return boolean
      */
     public function newFolder($namefile,$path){
+        if ($this->repository && method_exists($this->repository, 'newFolder')) {
+            return $this->repository->newFolder($namefile, $path);
+        }
         $fullpath = $this->getFullPath().$path;
         $namefile = $this->clearNameFile($namefile);
         $namefile = $this->sanitizeNameFolder($namefile);
@@ -713,18 +722,22 @@ class Filemanager
     }
 
     /**
-     * Borra un archivo
-     * @param string or array $namefiles
+     * Delete a file or array of files
+     * @param string|array $namefiles
      * @param string $path
      * @return void
      */
     public function delete($namefiles,$path){
+        if ($this->repository && method_exists($this->repository, 'delete')) {
+            return $this->repository->delete($namefiles, $path);
+        }
+
         if(is_string($namefiles)){
             $namefile = $this->sanitize($namefiles);
             $fullpath = $this->getFullPath().$path;
             $namefile = $this->clearNameFile($namefile);
             $file = new Filesystem;
-            if($this->validNameFile($namefile,false) && $file->exists($fullpath.$namefile)){
+            if($this->validNameFile($namefile,false) && ($file->exists($fullpath.$namefile) || ($this->storage && $this->storage->fileExists($fullpath.$namefile)))){
                 if( $this->config['debug'] ) $this->_log('$fullpath.$namefile - '.$fullpath.$namefile);
                 if(is_dir($fullpath.$namefile)){
                     $file->remove($fullpath.$namefile);
@@ -740,7 +753,12 @@ class Filemanager
                         $fullpaththumb_name = $this->getFullPath().'/'.$this->config['folder_thumb'].$path.$filename_new;
                         $file->remove($fullpaththumb_name);
                     }
-                    $file->remove($fullpath.$namefile);
+                    // Prefer StorageService delete when available
+                    if ($this->storage && $this->storage->fileExists($fullpath.$namefile)) {
+                        $this->storage->delete($fullpath.$namefile);
+                    } else {
+                        $file->remove($fullpath.$namefile);
+                    }
                     $result = array("query"=>"BE_DELETE_DELETED","params"=>array());
                     $this->setInfo(array("msg"=>$result));
                 }else{
@@ -764,7 +782,12 @@ class Filemanager
                         if(is_dir($fullpath.$namefile)){
                             $file->remove($fullpath.$namefile);
                             $file->remove($this->getFullPath().'/'.$this->config['folder_thumb'].$path.$namefile);
-                            $data[] = array("status"=>1,"namefile"=>$namefile,"query"=>"BE_DELETE_DELETED","params"=>array());
+                                    if ($this->storage && $this->storage->fileExists($fullpath.$namefile)) {
+                                        $this->storage->delete($fullpath.$namefile);
+                                    } else {
+                                        $file->remove($fullpath.$namefile);
+                                    }
+                                    $data[] = array("status"=>1,"namefile"=>$namefile,"query"=>"BE_DELETE_DELETED","params"=>array());
                         }elseif($this->validNameFile($namefile) && is_file($fullpath.$namefile)){
                             $file2 = new \SplFileInfo($fullpath.$namefile);
                             $filename = $file2->getFilename();
@@ -792,13 +815,17 @@ class Filemanager
     }
 
     /**
-     * Renombra un archivo
+     * Rename a file
      * @param string $nameold
      * @param string $namenew
      * @param string $path
      * @return void
      */
     public function rename($nameold,$namenew,$path){
+        if ($this->repository && method_exists($this->repository, 'rename')) {
+            return $this->repository->rename($nameold, $namenew, $path);
+        }
+
         if($this->validNameFile($nameold,false) && $this->validNameFile($namenew,false)){
             $fullpath = $this->getFullPath().$path;
             $nameold = $this->clearNameFile($nameold);
@@ -858,13 +885,17 @@ class Filemanager
    }
 
     /**
-     * Mueve un archivo o directorio
-     * @param  string $nameold nombre del archivo
-     * @param  string $pathnew ruta del directorio destino
-     * @param  string $path    ruta del directorio origen
+     * Move a file or directory
+     * @param  string $nameold file name
+     * @param  string $pathnew destination directory path
+     * @param  string $path    source directory path
      * @return void
      */
     public function move($nameold,$pathnew,$path){
+        if ($this->repository && method_exists($this->repository, 'move')) {
+            return $this->repository->move($nameold, $pathnew, $path);
+        }
+
         if($this->validNameFile($nameold,false) && preg_match_all("#^/{1}$|^/[a-z0-9A-Z]{1}([a-z0-9A-Z-_/])*(/|[a-z0-9A-Z-_]{1,})+$#",$pathnew) > 0){
             $nameold = $this->clearNameFile($nameold);
             $fullpath = $this->sanitizeNameFolder($this->getFullPath().$path,true);
@@ -946,16 +977,28 @@ class Filemanager
     }
 
     /**
-     * Descargar archivo
-     * @param  string $name nombre de archivo
-     * @param  string $path ruta relativa
+     * Download a file
+     * @param  string $name file name
+     * @param  string $path relative path
      * @return void
      */
     public function download($name,$path){
         $ruta = $this->getFullPath().$path.$name;
         if( $this->config['debug'] ) $this->_log('$ruta - '.$ruta);
-        if($this->validNameFile($name) && file_exists($ruta) && is_file($ruta) ){
-            $response = new Response(file_get_contents($ruta));
+        if($this->validNameFile($name) && (($this->storage && $this->storage->fileExists($ruta)) || (file_exists($ruta) && is_file($ruta)))){
+            if ($this->storage && $this->storage->fileExists($ruta)) {
+                $stream = $this->storage->readStream($ruta);
+                $contents = '';
+                if (is_resource($stream)) {
+                    while (!feof($stream)) { $contents .= fread($stream, 8192); }
+                    fclose($stream);
+                } else {
+                    $contents = '';
+                }
+                $response = new Response($contents);
+            } else {
+                $response = new Response(file_get_contents($ruta));
+            }
             $response->headers->set('Content-Type', 'application/octet-stream');
             $d = $response->headers->makeDisposition(ResponseHeaderBag::DISPOSITION_ATTACHMENT,$name);
             $response->headers->set('Content-Disposition', $d);
@@ -967,7 +1010,7 @@ class Filemanager
     }
 
     /**
-     * Ejecuta todo las configuraciones
+     * Execute the requested actions and return JSON response
      * @return JsonResponse
      */
     public function run(){
@@ -987,7 +1030,8 @@ class Filemanager
                     if(is_array($folders))
                         $this->setInfo(array( "data" => $folders ));
                 }elseif($this->action==='uploadfile' ){
-                    $files = $this->uploadAll($request->files->get('file'),$path);
+                    // $files = $this->uploadAll($request->files->get('file'),$path);
+                    $files = $this->repository->uploadAll($request->files->get('file'), $path);
                     if($files)
                         $this->setInfo(array( "data" => $files ));
                 }elseif($this->action==='newfolder'){
