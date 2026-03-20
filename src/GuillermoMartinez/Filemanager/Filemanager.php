@@ -13,6 +13,9 @@ use Symfony\Component\Filesystem\Filesystem;
 use Gregwar\Image\Image as Imagen;
 use Symfony\Component\HttpFoundation\ResponseHeaderBag;
 use GuillermoMartinez\Filemanager\Repository\FileRepository;
+use GuillermoMartinez\Filemanager\Service\InputValidator;
+use GuillermoMartinez\Filemanager\Service\SanitizationService;
+use GuillermoMartinez\Filemanager\Service\FileOperationHandler;
 
 class Filemanager
 {
@@ -29,6 +32,21 @@ class Filemanager
     private $storage;
 
     private $repository;
+
+    /**
+     * InputValidator instance (Phase 1)
+     */
+    private $validator;
+
+    /**
+     * SanitizationService instance (Phase 1)
+     */
+    private $sanitizer;
+
+    /**
+     * FileOperationHandler instance (Phase 1)
+     */
+    private $fileOperationHandler;
 
     /**
      * actions = getfolder|uploadfile|newfolder|renamefile|deletefile|download
@@ -129,6 +147,13 @@ class Filemanager
             $this->_log(__METHOD__." - BEGIN FILEMANAGER");
         }
 
+        // Phase 1: Initialize validation and sanitization services
+        $this->validator = new InputValidator($this->log, $this->config);
+        $this->_log(__METHOD__." - InputValidator initialized");
+        
+        $this->sanitizer = new SanitizationService($this->log);
+        $this->_log(__METHOD__." - SanitizationService initialized");
+
         // Instantiate StorageService if storage config provided
         if (isset($this->config['storage']) && is_array($this->config['storage'])) {
             try {
@@ -157,6 +182,19 @@ class Filemanager
             if($this->config['debug']) $this->_log(__METHOD__.' - Failed to instantiate FileRepository: '.$e->getMessage());
             $this->repository = null;
         }
+
+        // Phase 1: Initialize file operation handler with callbacks (Phase 1 refactoring)
+        $this->fileOperationHandler = new FileOperationHandler(
+            $this->validator,
+            $this->sanitizer,
+            $this->log,
+            $this->config,
+            array($this, 'getFullPath'),      // Callback for full path (eliminates back-reference)
+            array($this, 'setInfo'),          // Callback for setInfo (eliminates back-reference)
+            array($this, 'imageSizeName')     // Callback for imageSizeName (eliminates back-reference)
+        );
+        $this->fileOperationHandler->setMaxUploadSizeCallback(array($this, 'getMaxUploadFileSize'));
+        $this->_log(__METHOD__." - FileOperationHandler initialized");
 
         if($this->config['type_file']=='images') {
             $this->config['ext'] = $this->config['images']['images_ext'];
@@ -216,49 +254,31 @@ class Filemanager
     }
 
     /**
-     * Validate the URL path (only formats like /directory/ or /file.txt)
+     * Delegate validation to InputValidator service (Phase 1)
      * @param string $path
      * @return boolean
      */
     public function validPath($path){
-        if(preg_match_all("#^/{1}$|^/[a-z0-9A-Z]{1}([a-z0-9A-Z-._/])*(/|[a-z0-9A-Z-_]+[.]{1}[a-z0-9A-Z]{1,})+$#",$path) > 0){
-            return true;
-        }else{
-            return false;
-        }
+        return $this->validator->validPath($path);
     }
 
     /**
-     * Validate a file name
+     * Delegate validation to InputValidator service (Phase 1)
      * @param string $filename
-     * @param bool $ext Whether to validate extension
+     * @param bool $ext
      * @return boolean
      */
     public function validNameFile($filename,$ext=true){
-        $filename = trim($filename);
-        if($filename!="." && $filename!=".." && $filename!=" " && preg_match_all("#^[a-zA-Z0-9-_.\s]+$#",$filename) > 0){
-            if($ext) return $this->validExt($filename);
-            else return true;
-        }else{
-            return false;
-        }
+        return $this->validator->validNameFile($filename, $ext);
     }
 
     /**
-     * Validate a file extension against configured allowed extensions
+     * Delegate validation to InputValidator service (Phase 1)
      * @param string $filename
      * @return boolean
      */
     public function validExt($filename){
-        $exts = $this->config['ext'];
-        $ext = $this->getExtension($filename);
-        if(array_search($ext,$exts)===false){
-            return false;
-        }else{
-            return true;
-        }
-
-
+        return $this->validator->validExt($filename);
     }
 
     /**
@@ -287,33 +307,22 @@ class Filemanager
     }
 
     /**
-     * Sanitize a string value
+     * Delegate sanitization to SanitizationService (Phase 1)
      * @param string $var
      * @return string
      */
-    private function sanitize($var) {
-        $sanitized = strip_tags($var);
-        $sanitized = str_replace('http://', '', $sanitized);
-        $sanitized = str_replace('https://', '', $sanitized);
-        $sanitized = str_replace('../', '', $sanitized);
-        $sanitized = str_replace('./', '', $sanitized);
-        return $sanitized;
+    public function sanitize($var) {
+        return $this->sanitizer->sanitize($var);
     }
 
     /**
-     * Sanitize a folder name
+     * Delegate sanitization to SanitizationService (Phase 1)
      * @param string $var
-     * @param bool $strict If true, remove trailing slash
+     * @param bool $strict
      * @return string
      */
-    private function sanitizeNameFolder($var,$strict=false) {
-        $sanitized = strip_tags($var);
-        $sanitized = str_replace('.', '', $sanitized);
-        $sanitized = preg_replace('@(\/)+@', '/', $sanitized);
-        if($strict){
-            if(substr($sanitized,-1)=='/') $sanitized = substr($sanitized,0,-1);
-        }
-        return $sanitized;
+    public function sanitizeNameFolder($var,$strict=false) {
+        return $this->sanitizer->sanitizeNameFolder($var, $strict);
     }
 
     /**
@@ -323,7 +332,7 @@ class Filemanager
      */
     public function removeExtension($filename)
     {
-        return substr($filename,0,strrpos( $filename, '.' ) ) ;
+        return $this->sanitizer->removeExtension($filename);
     }
 
     /**
@@ -332,9 +341,7 @@ class Filemanager
      * @return string
      */
     public function getExtension($nameFile){
-        $extension = substr( $nameFile, ( strrpos($nameFile, '.') + 1 ) ) ;
-        $extension = strtolower( $extension ) ;
-        return $extension;
+        return $this->validator->getExtension($nameFile);
     }
 
     /**
@@ -351,20 +358,12 @@ class Filemanager
     }
 
     /**
-     * Clean and normalize a file name
+     * Delegate name clearing to SanitizationService (Phase 1)
      * @param string $namefile
      * @return string
      */
     public function clearNameFile($namefile){
-        $namefile = strip_tags($namefile);
-        $namefile = trim($namefile);
-        $buscar = array("á","é","í","ó","ú","ñ","Ñ","Á","É","Í","Ó","Ú","ü","Ü");
-        $reemplazar = array("a","e","i","o","u","n","n","a","e","i","o","u","u","U");
-        $namefile = str_replace($buscar,$reemplazar,$namefile);
-        $namefile = preg_replace("/[\s]+/", '-', $namefile);
-        $namefile = preg_replace("/[^a-zA-Z0-9._-]/", '', $namefile);
-        $namefile = strtolower($namefile);
-        return $namefile;
+        return $this->sanitizer->clearNameFile($namefile);
     }
 
     /**
@@ -593,54 +592,13 @@ class Filemanager
     }
 
     /**
-     * Move an uploaded file into storage
+     * Delegate upload to FileOperationHandler (Phase 1)
      * @param UploadedFile $file
      * @param string $path
      * @return SplFileInfo|null
      */
     public function upload($file,$path){
-        if( $this->validExt($file->getClientOriginalName())){
-            if($file->getSize() > ($this->getMaxUploadFileSize() * 1024 * 1024) ){
-
-                $result = array("query"=>"BE_UPLOAD_FILE_SIZE_NOT_SERVER","params"=>array($file->getSize()));
-                $this->setInfo(array("msg"=>$result));
-
-                if( $this->config['debug'] ) $this->_log(__METHOD__." - file size no permitido server: ".$file->getSize());
-                return ;
-            }elseif($file->getSize() > ($this->config['upload']['size_max'] * 1024 * 1024) ){
-
-                $result = array("query"=>"BE_UPLOAD_FILE_SIZE_NOT_PERMITIDO","params"=>array($file->getSize()));
-                $this->setInfo(array("msg"=>$result));
-
-                if( $this->config['debug'] ) $this->_log(__METHOD__." - file size no permitido: ".$file->getSize());
-                return ;
-            }else{
-                if($file->isValid()){
-                    $dir = $this->getFullPath().$path;
-                    $namefile = $file->getClientOriginalName();
-                    $namefile = $this->clearNameFile($namefile);
-                    $nametemp = $namefile;
-                    if( $this->config["upload"]["overwrite"] ==false){
-                        $ext = $this->getExtension($namefile);
-                        $i=0;
-                        while(true){
-                            $pathnametemp = $dir.$nametemp;
-                            if(file_exists($pathnametemp)){
-                                $i++;
-                                $nametemp = $this->removeExtension( $namefile ) . '_' . $i . '.' . $ext ;
-                            }else{
-                                break;
-                            }
-                        }
-                    }
-                    $file->move($dir,$nametemp);
-                    $file = new  \SplFileInfo($dir.$nametemp);
-                    return $file;
-                }
-            }
-        }else{
-            if( $this->config['debug'] ) $this->_log(__METHOD__." - file extension no permitido: ".$file->getExtension());
-        }
+        return $this->fileOperationHandler->upload($file, $path);
     }
 
     /**
@@ -696,291 +654,51 @@ class Filemanager
     }
 
     /**
-     * Create or rename a folder
+     * Delegate new folder creation to FileOperationHandler (Phase 1)
      * @param string $namefile
      * @param string $path
      * @return boolean
      */
     public function newFolder($namefile,$path){
-        if ($this->repository && method_exists($this->repository, 'newFolder')) {
-            return $this->repository->newFolder($namefile, $path);
-        }
-        $fullpath = $this->getFullPath().$path;
-        $namefile = $this->clearNameFile($namefile);
-        $namefile = $this->sanitizeNameFolder($namefile);
-        $dir = new Filesystem;
-        if($dir->exists($fullpath.$namefile)){
-            $result = array("query"=>"BE_NEW_FOLDER_EXISTED %s","params"=>array($path.$namefile));
-            $this->setInfo(array("msg"=>$result,"status"=>0));
-            if( $this->config['debug'] ) $this->_log(__METHOD__." - Ya existe: ".$path.$namefile);
-            return false;
-        }else{
-            $dir->mkdir($fullpath.$namefile);
-            $result = array("query"=>"BE_NEW_FOLDER_CREATED %s","params"=>array($path.$namefile));
-            $this->setInfo(array("msg"=>$result,"data"=>array( "path" => $path, "namefile" => $namefile )));
-            return true;
-        }
+        return $this->fileOperationHandler->newFolder($namefile, $path);
     }
 
     /**
-     * Delete a file or array of files
+     * Delegate delete to FileOperationHandler (Phase 1)
      * @param string|array $namefiles
      * @param string $path
      * @return void
      */
     public function delete($namefiles,$path){
-        if ($this->repository && method_exists($this->repository, 'delete')) {
-            return $this->repository->delete($namefiles, $path);
-        }
-
-        if(is_string($namefiles)){
-            $namefile = $this->sanitize($namefiles);
-            $fullpath = $this->getFullPath().$path;
-            $namefile = $this->clearNameFile($namefile);
-            $file = new Filesystem;
-            if($this->validNameFile($namefile,false) && ($file->exists($fullpath.$namefile) || ($this->storage && $this->storage->fileExists($fullpath.$namefile)))){
-                if( $this->config['debug'] ) $this->_log('$fullpath.$namefile - '.$fullpath.$namefile);
-                if(is_dir($fullpath.$namefile)){
-                    $file->remove($fullpath.$namefile);
-                    $file->remove($this->getFullPath().'/'.$this->config['folder_thumb'].$path.$namefile);
-                    $result = array("query"=>"BE_DELETE_DELETED","params"=>array());
-                    $this->setInfo(array("msg"=>$result));
-                }elseif($this->validNameFile($namefile) && is_file($fullpath.$namefile)){
-                    $file2 = new \SplFileInfo($fullpath.$namefile);
-                    $filename = $file2->getFilename();
-                    foreach ($this->config['images']['resize'] as $key => $value) {
-                        $image_info = $this->imageSizeName($path,$filename,$value);
-                        $filename_new = $image_info['name'];
-                        $fullpaththumb_name = $this->getFullPath().'/'.$this->config['folder_thumb'].$path.$filename_new;
-                        $file->remove($fullpaththumb_name);
-                    }
-                    // Prefer StorageService delete when available
-                    if ($this->storage && $this->storage->fileExists($fullpath.$namefile)) {
-                        $this->storage->delete($fullpath.$namefile);
-                    } else {
-                        $file->remove($fullpath.$namefile);
-                    }
-                    $result = array("query"=>"BE_DELETE_DELETED","params"=>array());
-                    $this->setInfo(array("msg"=>$result));
-                }else{
-                    if( $this->config['debug'] ) $this->_log('$fullpath.$namefile - '.$fullpath.$namefile);
-                    $result = array("query"=>"BE_DELETE_NOT_EXIED","params"=>array());
-                    $this->setInfo(array("msg"=>$result, "status"=> 0));
-                }
-            }else{
-                if( $this->config['debug'] ) $this->_log('$fullpath.$namefile - '.$fullpath.$namefile);
-                $result = array("query"=>"BE_DELETE_NOT_EXIED","params"=>array());
-                $this->setInfo(array("msg"=>$result, "status"=> 0));
-            }
-        }elseif(is_array($namefiles)){
-            if(count($namefiles)>0){
-                $fullpath = $this->getFullPath().$path;
-                $data = array();
-                foreach ($namefiles as $key => $namefile) {
-                    $file = new Filesystem;
-                    if($this->validNameFile($namefile,false) && $file->exists($fullpath.$namefile)){
-                        if( $this->config['debug'] ) $this->_log('$fullpath.$namefile - '.$fullpath.$namefile);
-                        if(is_dir($fullpath.$namefile)){
-                            $file->remove($fullpath.$namefile);
-                            $file->remove($this->getFullPath().'/'.$this->config['folder_thumb'].$path.$namefile);
-                                    if ($this->storage && $this->storage->fileExists($fullpath.$namefile)) {
-                                        $this->storage->delete($fullpath.$namefile);
-                                    } else {
-                                        $file->remove($fullpath.$namefile);
-                                    }
-                                    $data[] = array("status"=>1,"namefile"=>$namefile,"query"=>"BE_DELETE_DELETED","params"=>array());
-                        }elseif($this->validNameFile($namefile) && is_file($fullpath.$namefile)){
-                            $file2 = new \SplFileInfo($fullpath.$namefile);
-                            $filename = $file2->getFilename();
-                            foreach ($this->config['images']['resize'] as $key => $value) {
-                                $image_info = $this->imageSizeName($path,$filename,$value);
-                                $filename_new = $image_info['name'];
-                                $fullpaththumb_name = $this->getFullPath().'/'.$this->config['folder_thumb'].$path.$filename_new;
-                                $file->remove($fullpaththumb_name);
-                            }
-                            $file->remove($fullpath.$namefile);
-                            $data[] = array("status"=>1,"namefile"=>$namefile,"query"=>"BE_DELETE_DELETED","params"=>array());
-                        }else{
-                            $data[] = array("status"=>0,"namefile"=>$namefile,"query"=>"BE_DELETE_NOT_EXIED","params"=>array());
-                        }
-                    }else{
-                        $data[] = array("status"=>0,"namefile"=>$namefile,"query"=>"BE_DELETE_NOT_EXIED","params"=>array());
-                    }
-                }
-                $this->setInfo(array("data"=>$data));
-            }else{
-                $result = array("query"=>"BE_DELETE_NOT_EXIED","params"=>array());
-                $this->setInfo(array("msg"=>$result, "status"=> 0));
-            }
-        }
+        $this->fileOperationHandler->delete($namefiles, $path);
     }
 
     /**
-     * Rename a file
+     * Delegate rename to FileOperationHandler (Phase 1)
      * @param string $nameold
      * @param string $namenew
      * @param string $path
      * @return void
      */
     public function rename($nameold,$namenew,$path){
-        if ($this->repository && method_exists($this->repository, 'rename')) {
-            return $this->repository->rename($nameold, $namenew, $path);
-        }
-
-        if($this->validNameFile($nameold,false) && $this->validNameFile($namenew,false)){
-            $fullpath = $this->getFullPath().$path;
-            $nameold = $this->clearNameFile($nameold);
-            $namenew = $this->clearNameFile($namenew);
-
-            $file = new Filesystem;
-            if($file->exists($fullpath.$nameold)){
-                if( $this->config['debug'] ) $this->_log('$fullpath.$nameold - '.$fullpath.$nameold);
-                if(is_dir($fullpath.$nameold)){
-                    $namenew = $this->sanitizeNameFolder($namenew);
-                    if($file->exists($fullpath.$namenew)==false){
-                        $file->rename($fullpath.$nameold,$fullpath.$namenew);
-                        $result = array("query"=>"BE_RENAME_MODIFIED","params"=>array());
-                        $this->setInfo(array("msg"=>$result,"data"=>array("namefile" => $namenew )));
-
-                    }else{
-                        $result = array("query"=>"BE_RENAME_EXISTED","params"=>array());
-                        $this->setInfo(array("msg"=>$result,"status"=>0));
-                    }
-                }elseif(is_file($fullpath.$nameold)){
-                    if($this->validExt($nameold)){
-                        $extold = $this->getExtension($nameold);
-                        $namenew = $namenew.'.'.$extold;
-                        if($file->exists($fullpath.$namenew)==false){
-                            $file2 = new \SplFileInfo($fullpath.$nameold);
-                            if(in_array($file2->getExtension(), $this->config['images']['images_ext'])){
-                                $filename = $file2->getFilename();
-                                foreach ($this->config['images']['resize'] as $key => $value) {
-                                    $image_info = $this->imageSizeName($path,$filename,$value);
-                                    $filename_old = $image_info['name'];
-                                    $fullpaththumb_name = $this->getFullPath().'/'.$this->config['folder_thumb'].$path.$filename_old;
-                                    $file->remove($fullpaththumb_name);
-                                }
-                            }
-                            $file->rename($fullpath.$nameold,$fullpath.$namenew);
-                            $file3 = new \SplFileInfo($fullpath.$namenew);
-                            $this->createThumb($file3,$path);
-                            $result = array("query"=>"BE_RENAME_MODIFIED","params"=>array());
-                            $this->setInfo(array("msg"=>$result,"data"=>array("namefile" => $namenew )));
-                        }else{
-                            $result = array("query"=>"BE_RENAME_EXISTED","params"=>array());
-                            $this->setInfo(array("msg"=>$result,"status"=>0));
-                        }
-                    }else{
-                        $result = array("query"=>"BE_RENAME_FILENAME_NOT_VALID","params"=>array());
-                        $this->setInfo(array("msg"=>$result, "status"=>0));
-                    }
-                }
-            }else{
-                $result = array("query"=>"BE_RENAME_NOT_EXISTS","params"=>array());
-                $this->setInfo(array("msg"=>$result, "status"=>0));
-            }
-        }else{
-           $result = array("query"=>"BE_RENAME_FILENAME_NOT_VALID","params"=>array());
-           $this->setInfo(array("msg"=>$result, "status"=>0));
-       }
-   }
-
-    /**
-     * Move a file or directory
-     * @param  string $nameold file name
-     * @param  string $pathnew destination directory path
-     * @param  string $path    source directory path
-     * @return void
-     */
-    public function move($nameold,$pathnew,$path){
-        if ($this->repository && method_exists($this->repository, 'move')) {
-            return $this->repository->move($nameold, $pathnew, $path);
-        }
-
-        if($this->validNameFile($nameold,false) && preg_match_all("#^/{1}$|^/[a-z0-9A-Z]{1}([a-z0-9A-Z-_/])*(/|[a-z0-9A-Z-_]{1,})+$#",$pathnew) > 0){
-            $nameold = $this->clearNameFile($nameold);
-            $fullpath = $this->sanitizeNameFolder($this->getFullPath().$path,true);
-            $fullpathnew = $this->sanitizeNameFolder($this->getFullPath().$pathnew,true);
-            if( $this->config['debug'] ) $this->_log('$fullpath - '.$fullpath);
-            if( $this->config['debug'] ) $this->_log('$fullpathnew - '.$fullpathnew);
-            if( $this->config['debug'] ) $this->_log('$fullpath/$nameold - '.$fullpath.'/'.$nameold);
-            if( $this->config['debug'] ) $this->_log('$fullpathnew/$nameold - '.$fullpathnew.'/'.$nameold);
-
-            if($fullpath == $fullpathnew || $fullpath.'/'.$nameold==$fullpathnew.'/'.$nameold){
-                if( $this->config['debug'] ) $this->_log('$path == $pathnew Equals');
-                $result = array("query"=>"BE_MOVE_PATH_NOT_VALID","params"=>array());
-                $this->setInfo(array("msg"=>$result, "status"=>0));
-                return;
-            }elseif(strpos($fullpathnew.'/'.$nameold,$fullpath.'/'.$nameold.'/')!==false ){
-                if( $this->config['debug'] ) $this->_log('$pathnew internal of source - '.$pathnew);
-                $result = array("query"=>"BE_MOVE_PATH_NOT_VALID","params"=>array());
-                $this->setInfo(array("msg"=>$result, "status"=>0));
-                return;
-            }elseif(strpos($fullpath.'/'.$nameold,$fullpathnew.'/'.$nameold.'/')!==false ){
-                if( $this->config['debug'] ) $this->_log('$pathnew not moved in same folder - '.$pathnew);
-                $result = array("query"=>"BE_MOVE_PATH_NOT_VALID","params"=>array());
-                $this->setInfo(array("msg"=>$result, "status"=>0));
-                return;
-            }
-            $file = new Filesystem;
-            if($file->exists($fullpath.'/'.$nameold)){
-                if(is_dir($fullpath.'/'.$nameold)){
-                    if($file->exists($fullpathnew.'/'.$nameold)===false){
-                        if($file->exists($fullpathnew)==false){
-                            $file->mkdir($fullpathnew);
-                        }
-                        $file->rename($fullpath.'/'.$nameold,$fullpathnew.'/'.$nameold);
-                        $result = array("query"=>"BE_MOVE_MOVED","params"=>array());
-                        $fullpathnew_result = $this->sanitizeNameFolder($pathnew.'/'.$nameold,true);
-                        $this->setInfo(array("msg"=>$result,"data"=>array("namefile" => $fullpathnew_result)));
-                    }else{
-                        $result = array("query"=>"BE_MOVE_FOLDER_EXISTED","params"=>array());
-                        $this->setInfo(array("msg"=>$result, "status"=>0));
-                    }
-
-                }elseif(is_file($fullpath.'/'.$nameold)){
-                    if($this->validExt($nameold)){
-                        if($file->exists($fullpathnew.'/'.$nameold)===false){
-                            if($file->exists($fullpathnew)==false){
-                                $file->mkdir($fullpathnew);
-                            }
-                            $file2 = new \SplFileInfo($fullpath.'/'.$nameold);
-                            if(in_array($file2->getExtension(), $this->config['images']['images_ext'])){
-                                $filename = $file2->getFilename();
-                                foreach ($this->config['images']['resize'] as $key => $value) {
-                                    $image_info = $this->imageSizeName($path,$filename,$value);
-                                    $filename_old = $image_info['name'];
-                                    $fullpaththumb_name = $this->getFullPath().'/'.$this->config['folder_thumb'].$path.$filename_old;
-                                    $file->remove($fullpaththumb_name);
-                                }
-                            }
-                            $file->rename($fullpath.'/'.$nameold,$fullpathnew.'/'.$nameold);
-                            $result = array("query"=>"BE_MOVE_MOVED","params"=>array());
-                            $fullpathnew_result = $this->sanitizeNameFolder($pathnew.'/'.$nameold,true);
-                            $this->setInfo(array("msg"=>$result,"data"=>array("namefile" => $fullpathnew_result)));
-                        }else{
-                            $result = array("query"=>"BE_MOVE_EXISTED","params"=>array());
-                            $this->setInfo(array("msg"=>$result, "status"=>0));
-                        }
-                    }else{
-                        $result = array("query"=>"BE_MOVE_FILENAME_NOT_VALID","params"=>array());
-                        $this->setInfo(array("msg"=>$result, "status"=>0));
-                    }
-                }
-            }else{
-                $result = array("query"=>"BE_MOVE_NOT_EXISTS","params"=>array());
-                $this->setInfo(array("msg"=>$result, "status"=>0));
-            }
-        }else{
-            $result = array("query"=>"BE_MOVE_FILENAME_NOT_VALID","params"=>array());
-            $this->setInfo(array("msg"=>$result, "status"=>0));
-        }
+        $this->fileOperationHandler->rename($nameold, $namenew, $path);
     }
 
     /**
-     * Download a file
-     * @param  string $name file name
-     * @param  string $path relative path
+     * Delegate move to FileOperationHandler (Phase 1)
+     * @param string $nameold
+     * @param string $pathnew
+     * @param string $path
+     * @return void
+     */
+    public function move($nameold,$pathnew,$path){
+        $this->fileOperationHandler->move($nameold, $pathnew, $path);
+    }
+
+    /**
+     * Delegate download to appropriate handler (Phase 1)
+     * @param string $name
+     * @param string $path
      * @return void
      */
     public function download($name,$path){
