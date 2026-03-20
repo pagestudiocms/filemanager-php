@@ -111,7 +111,10 @@ class Filemanager
      * @param array $extra overwrites settings
      */
     public function __construct($extra=array()) {
-        $this->config = array(
+        // Phase 3: Use ConfigResolver for validated configuration management
+        
+        // Build initial config with defaults
+        $defaults = array(
             "doc_root" => "",
             "url" => "/",
             "source" => "userfiles", // Relative the doc root
@@ -137,14 +140,34 @@ class Filemanager
             "folder_thumb" => '_thumbs',
         );
         
-        if(isset($_SERVER['DOCUMENT_ROOT'])) $this->config['doc_root'] = $_SERVER['DOCUMENT_ROOT'];
-        if(count($extra)>0) $this->setup($extra);
+        // Merge with user-provided config
+        if(isset($_SERVER['DOCUMENT_ROOT'])) $defaults['doc_root'] = $_SERVER['DOCUMENT_ROOT'];
         
-        if($this->config['debug']){
+        // Merge extra config if provided (before logging setup to respect debug flag)
+        $userConfig = array_merge($defaults, $extra);
+        
+        // Initialize logger first (required by ConfigResolver)
+        if($userConfig['debug']){
             $this->log = new Logger('filemanager');
-            $this->log->pushHandler(new StreamHandler($this->config['debugfile']));
+            $this->log->pushHandler(new StreamHandler($userConfig['debugfile']));
             $this->init = microtime();
             $this->_log(__METHOD__." - BEGIN FILEMANAGER");
+        }
+
+        // Phase 3: Instantiate ConfigResolver and validate all configuration
+        $configResolver = new \GuillermoMartinez\Filemanager\Service\ConfigResolver($this->log);
+        
+        try {
+            $this->config = $configResolver->resolve($userConfig);
+            if ($this->log) {
+                $this->log->info(__METHOD__." - ConfigResolver validated configuration (Phase 3)");
+            }
+        } catch (\Exception $e) {
+            // ConfigResolver validation failed - log and use defaults
+            if ($this->log) {
+                $this->log->error(__METHOD__." - ConfigResolver failed: ".$e->getMessage());
+            }
+            $this->config = $defaults;  // Fallback to defaults
         }
 
         // Phase 1: Initialize validation and sanitization services
