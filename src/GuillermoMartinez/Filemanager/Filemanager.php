@@ -154,6 +154,14 @@ class Filemanager
         $this->sanitizer = new SanitizationService($this->log);
         $this->_log(__METHOD__." - SanitizationService initialized");
 
+        // Phase 2: Initialize file type validator (real MIME detection)
+        $fileTypeValidator = new \GuillermoMartinez\Filemanager\Service\FileTypeValidator($this->log, $this->config);
+        $this->_log(__METHOD__." - FileTypeValidator initialized (Phase 2)");
+
+        // Phase 2: Initialize event dispatcher for extensibility
+        $eventDispatcher = new \GuillermoMartinez\Filemanager\Service\FileEventDispatcher($this->log);
+        $this->_log(__METHOD__." - FileEventDispatcher initialized (Phase 2)");
+
         // Instantiate StorageService if storage config provided
         if (isset($this->config['storage']) && is_array($this->config['storage'])) {
             try {
@@ -184,6 +192,7 @@ class Filemanager
         }
 
         // Phase 1: Initialize file operation handler with callbacks (Phase 1 refactoring)
+        // Phase 2: Inject FileTypeValidator and FileEventDispatcher
         $this->fileOperationHandler = new FileOperationHandler(
             $this->validator,
             $this->sanitizer,
@@ -191,10 +200,12 @@ class Filemanager
             $this->config,
             array($this, 'getFullPath'),      // Callback for full path (eliminates back-reference)
             array($this, 'setInfo'),          // Callback for setInfo (eliminates back-reference)
-            array($this, 'imageSizeName')     // Callback for imageSizeName (eliminates back-reference)
+            array($this, 'imageSizeName'),    // Callback for imageSizeName (eliminates back-reference)
+            $fileTypeValidator,               // Phase 2: File type validator
+            $eventDispatcher                  // Phase 2: Event dispatcher
         );
         $this->fileOperationHandler->setMaxUploadSizeCallback(array($this, 'getMaxUploadFileSize'));
-        $this->_log(__METHOD__." - FileOperationHandler initialized");
+        $this->_log(__METHOD__." - FileOperationHandler initialized with Phase 2 services");
 
         if($this->config['type_file']=='images') {
             $this->config['ext'] = $this->config['images']['images_ext'];
@@ -725,6 +736,70 @@ class Filemanager
         }else{
             exit();
             // return null;
+        }
+    }
+
+    /**
+     * Phase 2: Public event API to register listeners
+     * Subscribe to a file operation event
+     * 
+     * @param string $eventName
+     * @param callable $callback
+     * @param int $priority
+     * @return void
+     */
+    public function on($eventName, callable $callback, $priority = 0)
+    {
+        if ($this->fileOperationHandler) {
+            if ($this->log) {
+                $this->log->debug('Filemanager::on - registering listener for: ' . $eventName);
+            }
+            $dispatcher = $this->fileOperationHandler->getEventDispatcher();
+            if ($dispatcher) {
+                $dispatcher->on($eventName, $callback, $priority);
+            }
+        }
+    }
+
+    /**
+     * Phase 2: Public event API - one-time listener
+     * Subscribe once to a file operation event
+     * 
+     * @param string $eventName
+     * @param callable $callback
+     * @return void
+     */
+    public function once($eventName, callable $callback)
+    {
+        if ($this->fileOperationHandler) {
+            if ($this->log) {
+                $this->log->debug('Filemanager::once - registering one-time listener for: ' . $eventName);
+            }
+            $dispatcher = $this->fileOperationHandler->getEventDispatcher();
+            if ($dispatcher) {
+                $dispatcher->once($eventName, $callback);
+            }
+        }
+    }
+
+    /**
+     * Phase 2: Public event API - unsubscribe
+     * Remove listener from event
+     * 
+     * @param string $eventName
+     * @param callable $callback
+     * @return void
+     */
+    public function off($eventName, callable $callback)
+    {
+        if ($this->fileOperationHandler) {
+            if ($this->log) {
+                $this->log->debug('Filemanager::off - removing listener from: ' . $eventName);
+            }
+            $dispatcher = $this->fileOperationHandler->getEventDispatcher();
+            if ($dispatcher) {
+                $dispatcher->off($eventName, $callback);
+            }
         }
     }
 

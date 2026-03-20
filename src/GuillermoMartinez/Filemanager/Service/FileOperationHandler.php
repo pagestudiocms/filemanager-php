@@ -29,6 +29,16 @@ class FileOperationHandler
     private $sanitizer;
 
     /**
+     * @var FileTypeValidator (Phase 2)
+     */
+    private $fileTypeValidator;
+
+    /**
+     * @var FileEventDispatcher (Phase 2)
+     */
+    private $eventDispatcher;
+
+    /**
      * Configuration array
      */
     private $config;
@@ -60,7 +70,9 @@ class FileOperationHandler
         $config = array(),
         $getFullPathCallback = null,
         $setInfoCallback = null,
-        $imageSizeNameCallback = null
+        $imageSizeNameCallback = null,
+        FileTypeValidator $fileTypeValidator = null,
+        FileEventDispatcher $eventDispatcher = null
     ) {
         $this->validator = $validator;
         $this->sanitizer = $sanitizer;
@@ -69,6 +81,10 @@ class FileOperationHandler
         $this->getFullPathCallback = $getFullPathCallback;
         $this->setInfoCallback = $setInfoCallback;
         $this->imageSizeNameCallback = $imageSizeNameCallback;
+        
+        // Phase 2: Initialize file type validator and event dispatcher
+        $this->fileTypeValidator = $fileTypeValidator;
+        $this->eventDispatcher = $eventDispatcher;
     }
 
     /**
@@ -77,6 +93,37 @@ class FileOperationHandler
     public function setMaxUploadSizeCallback($callback)
     {
         $this->maxUploadSizeCallback = $callback;
+    }
+
+    /**
+     * Set file type validator (Phase 2)
+     */
+    public function setFileTypeValidator(FileTypeValidator $validator)
+    {
+        $this->fileTypeValidator = $validator;
+        if ($this->log) {
+            $this->log->debug('FileOperationHandler::setFileTypeValidator - set');
+        }
+    }
+
+    /**
+     * Set event dispatcher (Phase 2)
+     */
+    public function setEventDispatcher(FileEventDispatcher $dispatcher)
+    {
+        $this->eventDispatcher = $dispatcher;
+        if ($this->log) {
+            $this->log->debug('FileOperationHandler::setEventDispatcher - set');
+        }
+    }
+
+    /**
+     * Get event dispatcher (Phase 2)
+     * Public getter to eliminate Reflection anti-pattern in Filemanager
+     */
+    public function getEventDispatcher()
+    {
+        return $this->eventDispatcher;
     }
 
     /**
@@ -135,6 +182,22 @@ class FileOperationHandler
             $this->log->info('FileOperationHandler::upload - ENTER: filename=' . $file->getClientOriginalName() . ', size_kb=' . round($file->getSize() / 1024) . ', path=' . $path);
         }
 
+        // Phase 2: Dispatch before_upload event
+        if ($this->eventDispatcher) {
+            $beforeEvent = new \GuillermoMartinez\Filemanager\Service\FileOperationEvent(
+                'upload',
+                array('file' => $file, 'path' => $path, 'namespace' => 'filemanager')
+            );
+            $this->eventDispatcher->dispatch(FileEventDispatcher::EVENT_BEFORE_UPLOAD, $beforeEvent);
+            
+            if ($beforeEvent->isCancelled()) {
+                if ($this->log) {
+                    $this->log->warning('FileOperationHandler::upload - EXIT: cancelled by event listener - ' . $beforeEvent->getCancelReason());
+                }
+                return null;
+            }
+        }
+
         if (!$this->validator->validExt($file->getClientOriginalName())) {
             if ($this->log) {
                 $this->log->warning('FileOperationHandler::upload - EXIT: invalid extension');
@@ -145,7 +208,7 @@ class FileOperationHandler
         $max_server = $this->getMaxUploadFileSize();
         if ($file->getSize() > ($max_server * 1024 * 1024)) {
             if ($this->log) {
-                $this->log->warning('FileOperationHandler::upload - EXIT: file size ' . $file->getSize() . ' exceeds server limit ' . ($max_server * 1024 * 1024));
+                $this->log->info('FileOperationHandler::upload - file size ' . $file->getSize() . ' exceeds server limit ' . ($max_server * 1024 * 1024));
             }
             $result = array("query" => "BE_UPLOAD_FILE_SIZE_NOT_SERVER", "params" => array($file->getSize()));
             $this->setInfo(array("msg" => $result));
@@ -155,7 +218,7 @@ class FileOperationHandler
         $max_config = $this->config['upload']['size_max'];
         if ($file->getSize() > ($max_config * 1024 * 1024)) {
             if ($this->log) {
-                $this->log->warning('FileOperationHandler::upload - EXIT: file size ' . $file->getSize() . ' exceeds configured limit ' . ($max_config * 1024 * 1024));
+                $this->log->info('FileOperationHandler::upload - file size ' . $file->getSize() . ' exceeds configured limit ' . ($max_config * 1024 * 1024));
             }
             $result = array("query" => "BE_UPLOAD_FILE_SIZE_NOT_PERMITIDO", "params" => array($file->getSize()));
             $this->setInfo(array("msg" => $result));
@@ -201,6 +264,33 @@ class FileOperationHandler
         $file->move($dir, $nametemp);
         $uploadedFile = new \SplFileInfo($dir . $nametemp);
 
+        // Phase 2: Real MIME type validation using FileTypeValidator
+        if ($this->fileTypeValidator) {
+            $fullPath = $uploadedFile->getRealPath();
+            if (!$this->fileTypeValidator->isValidFileType($fullPath)) {
+                if ($this->log) {
+                    $this->log->warning('FileOperationHandler::upload - EXIT: MIME type validation failed for ' . $fullPath);
+                }
+                // Remove the uploaded file since MIME type is invalid
+                @unlink($fullPath);
+                $result = array("query" => "BE_UPLOAD_INVALID_MIME", "params" => array($uploadedFile->getFilename()));
+                $this->setInfo(array("msg" => $result, "status" => 0));
+                return null;
+            }
+            if ($this->log) {
+                $this->log->debug('FileOperationHandler::upload - MIME type validation passed');
+            }
+        }
+
+        // Phase 2: Dispatch after_upload event
+        if ($this->eventDispatcher) {
+            $afterEvent = new \GuillermoMartinez\Filemanager\Service\FileOperationEvent(
+                'upload',
+                array('file' => $uploadedFile, 'path' => $path, 'namespace' => 'filemanager')
+            );
+            $this->eventDispatcher->dispatch(FileEventDispatcher::EVENT_AFTER_UPLOAD, $afterEvent);
+        }
+
         if ($this->log) {
             $this->log->info('FileOperationHandler::upload - EXIT: SUCCESS - ' . $uploadedFile->getRealPath());
         }
@@ -219,6 +309,24 @@ class FileOperationHandler
     {
         if ($this->log) {
             $this->log->info('FileOperationHandler::newFolder - ENTER: name=' . $namefile . ', path=' . $path);
+        }
+
+        // Phase 2: Dispatch before_create_folder event
+        if ($this->eventDispatcher) {
+            $beforeEvent = new \GuillermoMartinez\Filemanager\Service\FileOperationEvent(
+                'create_folder',
+                array('name' => $namefile, 'path' => $path, 'namespace' => 'filemanager')
+            );
+            $this->eventDispatcher->dispatch(\GuillermoMartinez\Filemanager\Service\FileEventDispatcher::EVENT_BEFORE_CREATE_FOLDER, $beforeEvent);
+            
+            if ($beforeEvent->isCancelled()) {
+                if ($this->log) {
+                    $this->log->warning('FileOperationHandler::newFolder - EXIT: cancelled by event listener - ' . $beforeEvent->getCancelReason());
+                }
+                $result = array("query" => "BE_NEW_FOLDER_CANCELLED", "params" => array($beforeEvent->getCancelReason()));
+                $this->setInfo(array("msg" => $result, "status" => 0));
+                return false;
+            }
         }
 
         $fullpath = $this->getFullPath() . $path;
@@ -243,17 +351,31 @@ class FileOperationHandler
         try {
             $dir->mkdir($fullpath . $namefile);
             if ($this->log) {
-                $this->log->info('FileOperationHandler::newFolder - EXIT: SUCCESS - created ' . $fullpath . $namefile);
+                $this->log->info('FileOperationHandler::newFolder - folder created: ' . $fullpath . $namefile);
             }
         } catch (\Exception $e) {
             if ($this->log) {
-                $this->log->error('FileOperationHandler::newFolder - EXIT: FAILED - ' . $e->getMessage());
+                $this->log->error('FileOperationHandler::newFolder - mkdir failed: ' . $e->getMessage());
             }
             return false;
         }
 
+        // Phase 2: Dispatch after_create_folder event
+        if ($this->eventDispatcher) {
+            $afterEvent = new \GuillermoMartinez\Filemanager\Service\FileOperationEvent(
+                'create_folder',
+                array('name' => $namefile, 'path' => $path, 'namespace' => 'filemanager')
+            );
+            $this->eventDispatcher->dispatch(\GuillermoMartinez\Filemanager\Service\FileEventDispatcher::EVENT_AFTER_CREATE_FOLDER, $afterEvent);
+        }
+
         $result = array("query" => "BE_NEW_FOLDER_CREATED %s", "params" => array($path . $namefile));
         $this->setInfo(array("msg" => $result, "data" => array("path" => $path, "namefile" => $namefile)));
+        
+        if ($this->log) {
+            $this->log->info('FileOperationHandler::newFolder - EXIT: SUCCESS');
+        }
+        
         return true;
     }
 
@@ -268,6 +390,24 @@ class FileOperationHandler
     {
         if ($this->log) {
             $this->log->info('FileOperationHandler::delete - path: ' . $path);
+        }
+
+        // Phase 2: Dispatch before_delete event
+        if ($this->eventDispatcher) {
+            $beforeEvent = new \GuillermoMartinez\Filemanager\Service\FileOperationEvent(
+                'delete',
+                array('files' => $namefiles, 'path' => $path, 'namespace' => 'filemanager')
+            );
+            $this->eventDispatcher->dispatch(\GuillermoMartinez\Filemanager\Service\FileEventDispatcher::EVENT_BEFORE_DELETE, $beforeEvent);
+            
+            if ($beforeEvent->isCancelled()) {
+                if ($this->log) {
+                    $this->log->warning('FileOperationHandler::delete - EXIT: cancelled by event listener - ' . $beforeEvent->getCancelReason());
+                }
+                $result = array("query" => "BE_DELETE_CANCELLED", "params" => array($beforeEvent->getCancelReason()));
+                $this->setInfo(array("msg" => $result, "status" => 0));
+                return;
+            }
         }
 
         if (is_string($namefiles)) {
@@ -300,6 +440,16 @@ class FileOperationHandler
             if (is_dir($fullpath . $namefile)) {
                 $file->remove($fullpath . $namefile);
                 $file->remove($this->getFullPath() . '/' . $this->config['folder_thumb'] . $path . $namefile);
+                
+                // Phase 2: Dispatch after_delete event on success
+                if ($this->eventDispatcher) {
+                    $afterEvent = new \GuillermoMartinez\Filemanager\Service\FileOperationEvent(
+                        'delete',
+                        array('files' => $namefile, 'path' => $path, 'namespace' => 'filemanager')
+                    );
+                    $this->eventDispatcher->dispatch(\GuillermoMartinez\Filemanager\Service\FileEventDispatcher::EVENT_AFTER_DELETE, $afterEvent);
+                }
+                
                 $result = array("query" => "BE_DELETE_DELETED", "params" => array());
                 $this->setInfo(array("msg" => $result));
                 if ($this->log) {
@@ -322,6 +472,16 @@ class FileOperationHandler
                 }
 
                 $file->remove($fullpath . $namefile);
+                
+                // Phase 2: Dispatch after_delete event on success
+                if ($this->eventDispatcher) {
+                    $afterEvent = new \GuillermoMartinez\Filemanager\Service\FileOperationEvent(
+                        'delete',
+                        array('files' => $namefile, 'path' => $path, 'namespace' => 'filemanager')
+                    );
+                    $this->eventDispatcher->dispatch(\GuillermoMartinez\Filemanager\Service\FileEventDispatcher::EVENT_AFTER_DELETE, $afterEvent);
+                }
+                
                 $result = array("query" => "BE_DELETE_DELETED", "params" => array());
                 $this->setInfo(array("msg" => $result));
                 if ($this->log) {
@@ -360,6 +520,16 @@ class FileOperationHandler
                     if (is_dir($fullpath . $namefile)) {
                         $file->remove($fullpath . $namefile);
                         $file->remove($this->getFullPath() . '/' . $this->config['folder_thumb'] . $path . $namefile);
+                        
+                        // Phase 2: Dispatch after_delete event on success
+                        if ($this->eventDispatcher) {
+                            $afterEvent = new \GuillermoMartinez\Filemanager\Service\FileOperationEvent(
+                                'delete',
+                                array('files' => $namefile, 'path' => $path, 'namespace' => 'filemanager')
+                            );
+                            $this->eventDispatcher->dispatch(\GuillermoMartinez\Filemanager\Service\FileEventDispatcher::EVENT_AFTER_DELETE, $afterEvent);
+                        }
+                        
                         $data[] = array("status" => 1, "namefile" => $namefile, "query" => "BE_DELETE_DELETED", "params" => array());
                     } elseif ($this->validator->validNameFile($namefile) && is_file($fullpath . $namefile)) {
                         $file2 = new \SplFileInfo($fullpath . $namefile);
@@ -377,6 +547,16 @@ class FileOperationHandler
                         }
                         
                         $file->remove($fullpath . $namefile);
+                        
+                        // Phase 2: Dispatch after_delete event on success
+                        if ($this->eventDispatcher) {
+                            $afterEvent = new \GuillermoMartinez\Filemanager\Service\FileOperationEvent(
+                                'delete',
+                                array('files' => $namefile, 'path' => $path, 'namespace' => 'filemanager')
+                            );
+                            $this->eventDispatcher->dispatch(\GuillermoMartinez\Filemanager\Service\FileEventDispatcher::EVENT_AFTER_DELETE, $afterEvent);
+                        }
+                        
                         $data[] = array("status" => 1, "namefile" => $namefile, "query" => "BE_DELETE_DELETED", "params" => array());
                     }
                 } else {
@@ -417,6 +597,24 @@ class FileOperationHandler
             return;
         }
 
+        // Phase 2: Dispatch before_rename event
+        if ($this->eventDispatcher) {
+            $beforeEvent = new \GuillermoMartinez\Filemanager\Service\FileOperationEvent(
+                'rename',
+                array('nameold' => $nameold, 'namenew' => $namenew, 'path' => $path, 'namespace' => 'filemanager')
+            );
+            $this->eventDispatcher->dispatch(\GuillermoMartinez\Filemanager\Service\FileEventDispatcher::EVENT_BEFORE_RENAME, $beforeEvent);
+            
+            if ($beforeEvent->isCancelled()) {
+                if ($this->log) {
+                    $this->log->warning('FileOperationHandler::rename - EXIT: cancelled by event listener - ' . $beforeEvent->getCancelReason());
+                }
+                $result = array("query" => "BE_RENAME_CANCELLED", "params" => array($beforeEvent->getCancelReason()));
+                $this->setInfo(array("msg" => $result, "status" => 0));
+                return;
+            }
+        }
+
         $fullpath = $this->getFullPath() . $path;
         $nameold = $this->sanitizer->clearNameFile($nameold);
         $namenew = $this->sanitizer->clearNameFile($namenew);
@@ -436,6 +634,16 @@ class FileOperationHandler
             $namenew = $this->sanitizer->sanitizeNameFolder($namenew);
             if (!$file->exists($fullpath . $namenew)) {
                 $file->rename($fullpath . $nameold, $fullpath . $namenew);
+                
+                // Phase 2: Dispatch after_rename event
+                if ($this->eventDispatcher) {
+                    $afterEvent = new \GuillermoMartinez\Filemanager\Service\FileOperationEvent(
+                        'rename',
+                        array('nameold' => $nameold, 'namenew' => $namenew, 'path' => $path, 'namespace' => 'filemanager')
+                    );
+                    $this->eventDispatcher->dispatch(\GuillermoMartinez\Filemanager\Service\FileEventDispatcher::EVENT_AFTER_RENAME, $afterEvent);
+                }
+                
                 $result = array("query" => "BE_RENAME_MODIFIED", "params" => array());
                 $this->setInfo(array("msg" => $result, "data" => array("namefile" => $namenew)));
                 if ($this->log) {
@@ -472,6 +680,16 @@ class FileOperationHandler
                     }
 
                     $file->rename($fullpath . $nameold, $fullpath . $namenew);
+                    
+                    // Phase 2: Dispatch after_rename event
+                    if ($this->eventDispatcher) {
+                        $afterEvent = new \GuillermoMartinez\Filemanager\Service\FileOperationEvent(
+                            'rename',
+                            array('nameold' => $nameold, 'namenew' => $namenew, 'path' => $path, 'namespace' => 'filemanager')
+                        );
+                        $this->eventDispatcher->dispatch(\GuillermoMartinez\Filemanager\Service\FileEventDispatcher::EVENT_AFTER_RENAME, $afterEvent);
+                    }
+                    
                     $result = array("query" => "BE_RENAME_MODIFIED", "params" => array());
                     $this->setInfo(array("msg" => $result, "data" => array("namefile" => $namenew)));
                     if ($this->log) {
@@ -540,6 +758,24 @@ class FileOperationHandler
             return;
         }
 
+        // Phase 2: Dispatch before_move event
+        if ($this->eventDispatcher) {
+            $beforeEvent = new \GuillermoMartinez\Filemanager\Service\FileOperationEvent(
+                'move',
+                array('name' => $nameold, 'from' => $path, 'to' => $pathnew, 'namespace' => 'filemanager')
+            );
+            $this->eventDispatcher->dispatch(\GuillermoMartinez\Filemanager\Service\FileEventDispatcher::EVENT_BEFORE_MOVE, $beforeEvent);
+            
+            if ($beforeEvent->isCancelled()) {
+                if ($this->log) {
+                    $this->log->warning('FileOperationHandler::move - EXIT: cancelled by event listener - ' . $beforeEvent->getCancelReason());
+                }
+                $result = array("query" => "BE_MOVE_CANCELLED", "params" => array($beforeEvent->getCancelReason()));
+                $this->setInfo(array("msg" => $result, "status" => 0));
+                return;
+            }
+        }
+
         $file = new Filesystem();
 
         if (!$file->exists($fullpath . '/' . $nameold)) {
@@ -557,6 +793,16 @@ class FileOperationHandler
                     $file->mkdir($fullpathnew);
                 }
                 $file->rename($fullpath . '/' . $nameold, $fullpathnew . '/' . $nameold);
+                
+                // Phase 2: Dispatch after_move event
+                if ($this->eventDispatcher) {
+                    $afterEvent = new \GuillermoMartinez\Filemanager\Service\FileOperationEvent(
+                        'move',
+                        array('name' => $nameold, 'from' => $path, 'to' => $pathnew, 'namespace' => 'filemanager')
+                    );
+                    $this->eventDispatcher->dispatch(\GuillermoMartinez\Filemanager\Service\FileEventDispatcher::EVENT_AFTER_MOVE, $afterEvent);
+                }
+                
                 $result = array("query" => "BE_MOVE_MOVED", "params" => array());
                 $fullpathnew_result = $this->sanitizer->sanitizeNameFolder($pathnew . '/' . $nameold, true);
                 $this->setInfo(array("msg" => $result, "data" => array("namefile" => $fullpathnew_result)));
@@ -595,6 +841,16 @@ class FileOperationHandler
                     }
 
                     $file->rename($fullpath . '/' . $nameold, $fullpathnew . '/' . $nameold);
+                    
+                    // Phase 2: Dispatch after_move event
+                    if ($this->eventDispatcher) {
+                        $afterEvent = new \GuillermoMartinez\Filemanager\Service\FileOperationEvent(
+                            'move',
+                            array('name' => $nameold, 'from' => $path, 'to' => $pathnew, 'namespace' => 'filemanager')
+                        );
+                        $this->eventDispatcher->dispatch(\GuillermoMartinez\Filemanager\Service\FileEventDispatcher::EVENT_AFTER_MOVE, $afterEvent);
+                    }
+                    
                     $result = array("query" => "BE_MOVE_MOVED", "params" => array());
                     $fullpathnew_result = $this->sanitizer->sanitizeNameFolder($pathnew . '/' . $nameold, true);
                     $this->setInfo(array("msg" => $result, "data" => array("namefile" => $fullpathnew_result)));
