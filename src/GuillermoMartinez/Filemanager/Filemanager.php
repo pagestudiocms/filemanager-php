@@ -99,6 +99,7 @@ class Filemanager
             "source" => "userfiles", // Relative the doc root
             "debug" => false,
             "debugfile" => "log/filemanager.log",
+            "require_auth" => false, // Set to true to enforce token validation in package (framework typically owns auth)
             "ext" => array("jpg","jpeg","gif","png","svg","txt","pdf","odp","ods","odt","rtf","doc","docx","xls","xlsx","ppt","pptx","csv","ogv","mp4","webm","m4v","ogg","mp3","wav","zip","rar"),
             "upload" => array(
                 "number" => 5,
