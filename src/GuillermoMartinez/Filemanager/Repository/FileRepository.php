@@ -4,33 +4,49 @@ namespace GuillermoMartinez\Filemanager\Repository;
 use Monolog\Logger;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Finder\Finder;
-use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\Finder\SplFileInfo;
 use GuillermoMartinez\Filemanager\Service\StorageService;
-use GuillermoMartinez\Filemanager\Service\ImageService;
 
+/**
+ * REMOVED: uploadAll() - Upload handling moved to Filemanager::uploadAll()
+ * REMOVED: upload() - Upload handling moved to FileOperationHandler
+ * REMOVED: createThumb() - Thumbnail creation moved to ImageService
+ * REMOVED: delete() - File deletion moved to FileOperationHandler
+ * REMOVED: rename() - File rename moved to FileOperationHandler
+ * REMOVED: move() - File move moved to FileOperationHandler
+ * REMOVED: clearNameFile() - Sanitization delegated to SanitizationService
+ * REMOVED: removeExtension() - Delegated to SanitizationService
+ *
+ * FileRepository now focuses exclusively on READ-ONLY data access operations.
+ */
 class FileRepository
 {
     private array $config;
     private ?StorageService $storage;
-    private ?ImageService $imageService;
 
     /**
-     * @var Logger Instance of Logger
+     * @var Logger Instance of Logger (read-only operations only)
      */
     public $logger = null;
 
+    /**
+     * Constructor - FileRepository is now a read-only data access layer
+     * 
+     * @param array $config Configuration array
+     * @param StorageService|null $storage Optional storage backend for file existence checks
+     * @param LoggerInterface|null $logger Optional logger
+     */
     public function __construct(
         array $config = [], 
-        ?StorageService $storage = null, 
-        ?ImageService $imageService = null,
+        ?StorageService $storage = null,
         ?LoggerInterface $logger = null
     ) {
         $this->config = $config;
         $this->storage = $storage;
-        $this->imageService = $imageService;
         $this->logger = $logger;
-        $this->logger->log('info', sprintf("%s - FileRepository initialized", __METHOD__));
+        if ($this->logger) {
+            $this->logger->log('info', sprintf("%s - FileRepository initialized (read-only mode)", __METHOD__));
+        }
     }
 
     public function getFullPath(): string
@@ -77,172 +93,6 @@ class FileRepository
             }
         }
         return null;
-    }
-
-    public function uploadAll($files, $path)
-    {
-        if (!is_array($files) || count($files) === 0) return null;
-        $n = count($files);
-        if ($n > ($this->config['upload']['number'] ?? 5)) {
-            return ['status'=>0,'msg'=>['query'=>'BE_UPLOAD_MAX_UPLOAD','params'=>[$this->config['upload']['number'] ?? 5]]];
-        }
-        $res = [];
-        $notresult = [];
-        foreach ($files as $file) {
-            $uploaded = $this->upload($file, $path);
-            if ($uploaded) {
-                // create thumb
-                $this->createThumb($uploaded, $path);
-                $res[] = $uploaded;
-            } else {
-                $notresult[] = $file->getClientOriginalName();
-            }
-        }
-        return ['uploaded'=>$res,'failed'=>$notresult];
-    }
-
-    public function upload($file, $path)
-    {
-        // $file is Symfony\Component\HttpFoundation\File\UploadedFile
-        if (!$file || !method_exists($file, 'getClientOriginalName')) return null;
-        $original = $file->getClientOriginalName();
-        if (!$this->validExt($original)) return null;
-        $size = $file->getSize();
-        $serverMax = min((int) ini_get('upload_max_filesize'), (int) ini_get('post_max_size'));
-        if ($size > ($serverMax * 1024 * 1024)) return null;
-        if (isset($this->config['upload']['size_max']) && $size > ($this->config['upload']['size_max'] * 1024 * 1024)) return null;
-
-        $namefile = $this->clearNameFile($original);
-        $nametemp = $namefile;
-        if (empty($this->config['upload']['overwrite'])) {
-            $ext = pathinfo($namefile, PATHINFO_EXTENSION);
-            $i = 0;
-            while (true) {
-                $pathnametemp = $this->getFullPath() . $path . $nametemp;
-                if ($this->storage && $this->storage->fileExists($pathnametemp)) {
-                    $i++; $nametemp = $this->removeExtension($namefile) . '_' . $i . '.' . $ext;
-                    continue;
-                } elseif (file_exists($pathnametemp)) {
-                    $i++; $nametemp = $this->removeExtension($namefile) . '_' . $i . '.' . $ext;
-                    continue;
-                }
-                break;
-            }
-        }
-
-        $destRelative = ltrim($this->config['source'] . $path . $nametemp, '/');
-        $destAbsolute = $this->getFullPath() . $path . $nametemp;
-
-        if ($this->storage) {
-            // ensure directory
-            $this->storage->createDirectory(ltrim($this->config['source'] . $path, '/'));
-            $stream = fopen($file->getRealPath(), 'rb');
-            $ok = $this->storage->writeStream($destAbsolute, $stream);
-            if (is_resource($stream)) fclose($stream);
-            if ($ok) {
-                // return filename
-                return $nametemp;
-            }
-            return null;
-        }
-
-        // Fallback: move uploaded file to destination
-        $dir = $this->getFullPath() . $path;
-        if (!is_dir($dir)) mkdir($dir, 0755, true);
-        $file->move($dir, $nametemp);
-        return $nametemp;
-    }
-
-    private function clearNameFile(string $namefile): string
-    {
-        $namefile = strip_tags($namefile);
-        $namefile = trim($namefile);
-        $buscar = ["á","é","í","ó","ú","ñ","Ñ","Á","É","Í","Ó","Ú","ü","Ü"];
-        $reemplazar = ["a","e","i","o","u","n","n","a","e","i","o","u","u","U"];
-        $namefile = str_replace($buscar, $reemplazar, $namefile);
-        $namefile = preg_replace("/[\s]+/", '-', $namefile);
-        $namefile = preg_replace("/[^a-zA-Z0-9._-]/", '', $namefile);
-        $namefile = strtolower($namefile);
-        return $namefile;
-    }
-
-    private function removeExtension($filename)
-    {
-        return substr($filename, 0, strrpos($filename, '.'));
-    }
-
-    private function createThumb($filename, $path)
-    {
-        $fullpath = $this->getFullPath() . $path;
-        $fullpaththumb = $this->getFullPath() . '/' . ($this->config['folder_thumb'] ?? '_thumbs') . $path;
-        foreach ($this->config['images']['resize'] as $value) {
-            $image_info = $this->imageSizeName($path, $filename, $value);
-            if ($this->imageService) {
-                $imageUploaded = $this->imageService->resize(
-                    $fullpath . $filename, 
-                    $fullpaththumb . $image_info['name'], 
-                    $image_info, 
-                    $value, 
-                    $this->config['images']['quality'] ?? null, 
-                    $this->logger
-                );
-                $this->logger->log('info', sprintf("%s - %s thumbnail for %s: %s", __METHOD__, $imageUploaded ? 'Created' : 'Failed to create', $filename, $image_info['name']));
-            }
-        }
-    }
-
-    public function delete($namefiles, $path)
-    {
-        $fullpath = $this->getFullPath() . $path;
-        $fs = new Filesystem();
-        $results = [];
-        if (is_string($namefiles)) $namefiles = [$namefiles];
-        foreach ($namefiles as $namefile) {
-            if (!$this->validNameFile($namefile, false)) { $results[] = ['status'=>0,'namefile'=>$namefile]; continue; }
-            $target = $fullpath . $namefile;
-            if ($this->storage && $this->storage->fileExists($target)) {
-                $this->storage->delete($target);
-                $results[] = ['status'=>1,'namefile'=>$namefile];
-                continue;
-            }
-            if ($fs->exists($target)) {
-                if (is_dir($target)) {
-                    $fs->remove($target);
-                } else {
-                    $fs->remove($target);
-                }
-                $results[] = ['status'=>1,'namefile'=>$namefile];
-            } else {
-                $results[] = ['status'=>0,'namefile'=>$namefile];
-            }
-        }
-        return $results;
-    }
-
-    public function rename($nameold, $namenew, $path)
-    {
-        $fullpath = $this->getFullPath() . $path;
-        $fs = new Filesystem();
-        $nameold = $this->clearNameFile($nameold);
-        $namenew = $this->clearNameFile($namenew);
-        if ($fs->exists($fullpath . $nameold)) {
-            $fs->rename($fullpath . $nameold, $fullpath . $namenew);
-            return true;
-        }
-        return false;
-    }
-
-    public function move($nameold, $pathnew, $path)
-    {
-        $fullpath = $this->getFullPath() . $path;
-        $fullpathnew = $this->getFullPath() . $pathnew;
-        $fs = new Filesystem();
-        if ($fs->exists($fullpath . $nameold)) {
-            if (!$fs->exists($fullpathnew)) $fs->mkdir($fullpathnew);
-            $fs->rename($fullpath . $nameold, $fullpathnew . '/' . $nameold);
-            return true;
-        }
-        return false;
     }
 
     private function fileInfo(SplFileInfo $file, string $path)
@@ -310,25 +160,35 @@ class FileRepository
         return in_array($ext, $search, true);
     }
 
+    /**
+     * Get the first thumbnail name for an image (read-only lookup)
+     * 
+     * Does not create thumbnails - that responsibility belongs to ImageService.
+     * Simply returns the calculated thumbnail filename for the primary resize config.
+     * 
+     * @param SplFileInfo $file The image file
+     * @param string $path The relative path
+     * @return string|null The thumbnail filename, or null if no resize config
+     */
     private function firstThumb(SplFileInfo $file, string $path): ?string
     {
-        $fullpath = $this->getFullPath() . $path;
-        $fullpaththumb = $this->getFullPath() . '/' . $this->config['folder_thumb'] . $path;
         $filename = $file->getFilename();
-        foreach ($this->config['images']['resize'] as $key => $value) {
-            $image_info = $this->imageSizeName($path, $filename, $value);
-            if (!file_exists($fullpaththumb . $image_info['name'])) {
-                // create via imageService if available
-                if ($this->imageService) {
-                    $this->imageService->resize($fullpath . $filename, $fullpaththumb . $image_info['name'], $image_info, $value, $this->config['images']['quality'] ?? null);
-                } else {
-                    // best-effort fallback
-                    @mkdir(dirname($fullpaththumb . $image_info['name']), 0755, true);
-                }
-            }
-            return $image_info['name'];
+        $resizeConfigs = $this->config['images']['resize'] ?? [];
+        
+        if (empty($resizeConfigs)) {
+            return null;
         }
-        return null;
+        
+        // Get the first resize configuration (handles both indexed and associative arrays)
+        $firstConfig = reset($resizeConfigs);
+        if (!is_array($firstConfig)) {
+            return null;
+        }
+        
+        // Return the name of the first resize configuration thumbnail
+        // (actual thumbnail file may or may not exist - that's caller's responsibility)
+        $image_info = $this->imageSizeName($path, $filename, $firstConfig);
+        return $image_info['name'] ?? null;
     }
 
     private function imageSizeName(string $path, string $imagen, array $image_config): array

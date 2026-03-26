@@ -10,7 +10,6 @@ use Monolog\Logger;
 use Monolog\Handler\StreamHandler;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\Filesystem\Filesystem;
-use Gregwar\Image\Image as Imagen;
 use Symfony\Component\HttpFoundation\ResponseHeaderBag;
 use GuillermoMartinez\Filemanager\Repository\FileRepository;
 use GuillermoMartinez\Filemanager\Service\InputValidator;
@@ -30,6 +29,21 @@ class Filemanager
      * StorageService instance
      */
     private $storage;
+
+    /**
+     * Flag indicating if StorageService initialized successfully (Task 2)
+     */
+    private $storageAvailable = false;
+
+    /**
+     * ImageService instance (Task 3)
+     */
+    private $imageService = null;
+
+    /**
+     * Flag indicating if ImageService initialized successfully (Task 3)
+     */
+    private $imageServiceAvailable = false;
 
     private $repository;
 
@@ -185,30 +199,29 @@ class Filemanager
         $eventDispatcher = new \GuillermoMartinez\Filemanager\Service\FileEventDispatcher($this->log);
         $this->_log(__METHOD__." - FileEventDispatcher initialized (Phase 2)");
 
-        // Instantiate StorageService if storage config provided
+        // Instantiate StorageService if storage config provided (Task 2: Add explicit state tracking)
         if (isset($this->config['storage']) && is_array($this->config['storage'])) {
             try {
                 $this->storage = new \GuillermoMartinez\Filemanager\Service\StorageService($this->config['storage']);
+                $this->storageAvailable = true;
+                if($this->config['debug']) $this->_log(__METHOD__.' - StorageService initialized successfully');
             } catch (\Throwable $e) {
-                if($this->config['debug']) $this->_log(__METHOD__.' - Failed to instantiate StorageService: '.$e->getMessage());
+                if($this->config['debug']) $this->_log(__METHOD__.' - StorageService initialization failed (using local filesystem): '.$e->getMessage(), 'warning');
+                $this->storageAvailable = false;
                 $this->storage = null;
             }
+        } else {
+            if($this->config['debug']) $this->_log(__METHOD__.' - No storage configuration provided (using local filesystem)');
+            $this->storageAvailable = false;
         }
 
-        // Ensure ImageService is available via config['images']['service']
-        if (isset($this->config['images']) && is_array($this->config['images'])) {
-            if (!isset($this->config['images']['service']) || !is_object($this->config['images']['service'])) {
-                try {
-                    $this->config['images']['service'] = new \GuillermoMartinez\Filemanager\Service\ImageService($this->config['images']);
-                } catch (\Throwable $e) {
-                    if($this->config['debug']) $this->_log(__METHOD__.' - Failed to instantiate ImageService: '.$e->getMessage());
-                }
-            }
-        }
+        // Ensure ImageService is available (Task 3: Extract into dedicated method with state tracking)
+        $this->imageService = $this->initializeImageService();
+        $this->imageServiceAvailable = ($this->imageService !== null);
 
-        // Instantiate repository facade
+        // Instantiate repository facade (now read-only data access layer)
         try {
-            $this->repository = new FileRepository($this->config, $this->storage, $this->config['images']['service'], $this->log);
+            $this->repository = new FileRepository($this->config, $this->storage, $this->log);
         } catch (\Throwable $e) {
             if($this->config['debug']) $this->_log(__METHOD__.' - Failed to instantiate FileRepository: '.$e->getMessage());
             $this->repository = null;
@@ -232,6 +245,35 @@ class Filemanager
 
         if($this->config['type_file']=='images') {
             $this->config['ext'] = $this->config['images']['images_ext'];
+        }
+    }
+
+    /**
+     * Initialize ImageService with proper error handling and state tracking (Task 3)
+     * 
+     * @return \GuillermoMartinez\Filemanager\Service\ImageService|null
+     */
+    private function initializeImageService()
+    {
+        if (!isset($this->config['images']) || !is_array($this->config['images'])) {
+            if($this->config['debug']) $this->_log(__METHOD__.' - No image configuration provided');
+            return null;
+        }
+
+        // If service provided via config
+        if (isset($this->config['images']['service']) && $this->config['images']['service'] instanceof \GuillermoMartinez\Filemanager\Service\ImageService) {
+            if($this->config['debug']) $this->_log(__METHOD__.' - ImageService provided via configuration');
+            return $this->config['images']['service'];
+        }
+
+        // Try to create new service
+        try {
+            $service = new \GuillermoMartinez\Filemanager\Service\ImageService($this->config['images']);
+            if($this->config['debug']) $this->_log(__METHOD__.' - ImageService initialized successfully');
+            return $service;
+        } catch (\Throwable $e) {
+            $this->_log(__METHOD__.' - ImageService initialization failed (thumbnails disabled): '.$e->getMessage(), 'warning');
+            return null;
         }
     }
 
@@ -522,29 +564,36 @@ class Filemanager
      * @param  array  $image_config    image size configuration
      * @return boolean
      */
-    public function resizeImage($path_imagen,$path_imagen_new,$image_info=array(),$image_config=array())
+    public function resizeImage(string $path_imagen, string $path_imagen_new, array $image_info = [], array $image_config = []): bool
     {
-        // Delegate to ImageService if provided
-        if (isset($this->config['images']['service']) && is_object($this->config['images']['service'])) {
-            try {
-                return $this->config['images']['service']->resize($path_imagen, $path_imagen_new, $image_info, $image_config, $this->config['images']['quality'] ?? null);
-            } catch (\Throwable $e) {
-                if($this->config['debug']) $this->_log(__METHOD__.' - ImageService resize error: '.$e->getMessage());
-                return false;
-            }
+        // ImageService is required (initialized in Task 3)
+        if (!$this->imageServiceAvailable || !$this->imageService) {
+            $this->_log(__METHOD__.' - ImageService not available, skipping resize', 'warning');
+            return false;
         }
-        // Fallback to previous implementation
-        $imagen_ext = $this->getExtension($path_imagen);
-        if ($image_config[2]===true && $image_config[3]===true) {
-            Imagen::open($path_imagen)->zoomCrop($image_info['width'],$image_info['height'])->save($path_imagen_new,$imagen_ext,$this->config['images']['quality']);
-            return true;
-        }elseif ( $image_config[2]===true && $image_config[3]===null ) {
-            Imagen::open($path_imagen)->scaleResize($image_info['width'],null)->save($path_imagen_new,$imagen_ext,$this->config['images']['quality']);
-            return true;
-        }elseif ( $image_config[2]===null && $image_config[3]===true ) {
-            Imagen::open($path_imagen)->scaleResize(null,$image_info['height'])->save($path_imagen_new,$imagen_ext,$this->config['images']['quality']);
-            return true;
-        }else{
+
+        $traceId = uniqid('resize_', true);
+        $this->_log(__METHOD__.' - Image resize starting', 'debug', ['file' => basename($path_imagen), 'trace_id' => $traceId]);
+
+        try {
+            $quality = $this->config['images']['quality'] ?? 85;
+            $result = $this->imageService->resize(
+                $path_imagen, 
+                $path_imagen_new, 
+                $image_info, 
+                $image_config, 
+                $quality
+            );
+            
+            if ($result) {
+                $this->_log(__METHOD__.' - Image resize completed successfully', 'debug', ['file' => basename($path_imagen_new), 'trace_id' => $traceId]);
+            } else {
+                $this->_log(__METHOD__.' - Image resize returned false', 'warning', ['file' => basename($path_imagen), 'trace_id' => $traceId]);
+            }
+            
+            return $result;
+        } catch (\Throwable $e) {
+            $this->_log(__METHOD__.' - Image resize failed: '.$e->getMessage(), 'error', ['file' => basename($path_imagen), 'trace_id' => $traceId]);
             return false;
         }
     }
@@ -641,49 +690,72 @@ class Filemanager
      * @param string $path
      * @return array|null
      */
-    public function uploadAll($files,$path){
-        // fallback to legacy behaviour
-        if( is_array($files) && count($files) > 0 ){
-            $n = count($files);
-            if( $n <= $this->config['upload']['number'] ){
-                $res = array();
-                $notresult = array();
-                foreach ($files as $key => $value) {
-                    $file = $this->upload($value,$path);
-                    if( $file ){
-                        $this->createThumb($file,$path);
-                        $res[] = $file->getFilename();
-                    }else{
-                        $notresult[] = $value->getClientOriginalName();
-                    }
-                }
-                $r = '';
-                $n2 = count($res);
-                $result = array("query"=>"BE_UPLOADALL_UPLOADS %s / %s","params"=>array($n2,$n));
-                if(count($notresult)>0){
-                    $result['query'] = $result['query'].' | BE_UPLOADALL_NOT_UPLOADS ';
-                    $i=0;
-                    $n = count($notresult);
-                    foreach ($notresult as $value) {
-                        $result['query'] = $result['query'] . ' %s';
-                        if( $n - 1 > $i ){
-                            $result['query'] = $result['query'] . ',';
-                            $value = $value.',';
-                        }
-                        $result['params'][] = $value;
-                        $i++;
+    /**
+     * Upload multiple files at once
+     * 
+     * @param array|null $files Array of UploadedFile objects
+     * @param string|null $path Target directory path
+     * @return array|null Array with upload results, or null if invalid input
+     */
+    public function uploadAll(?array $files, ?string $path): ?array
+    {
+        if (!is_array($files) || count($files) === 0) {
+            $this->_log(__METHOD__.' - No files provided', 'warning');
+            return null;
+        }
 
+        if (!isset($this->config['upload']['number']) || $this->config['upload']['number'] <= 0) {
+            $this->_log(__METHOD__.' - Invalid upload limit configured', 'error');
+            return null;
+        }
+
+        $fileCount = count($files);
+        if ($fileCount > $this->config['upload']['number']) {
+            $this->_log(__METHOD__.' - Too many files: '.$fileCount.' > '.$this->config['upload']['number'], 'warning');
+            $result = array("query"=>"BE_UPLOAD_MAX_UPLOAD %s","params"=>array($this->config['upload']['number']));
+            $this->setInfo(array("msg"=>$result,"status"=>0));
+            return null;
+        }
+
+        try {
+            $res = [];
+            $notresult = [];
+            
+            foreach ($files as $file) {
+                try {
+                    $uploadedFile = $this->upload($file, $path);
+                    if ($uploadedFile) {
+                        $this->createThumb($uploadedFile, $path);
+                        $res[] = $uploadedFile->getFilename();
+                    } else {
+                        $notresult[] = $file->getClientOriginalName();
                     }
-                    $this->setInfo(array("status"=>0));
+                } catch (\Throwable $e) {
+                    $this->_log(__METHOD__.' - File upload failed: '.$e->getMessage(), 'warning');
+                    $notresult[] = $file->getClientOriginalName();
                 }
-                $this->setInfo(array("msg"=>$result));
-                return $res;
-            }else{
-                $result = array("query"=>"BE_UPLOAD_MAX_UPLOAD %s","params"=>array($this->config['upload']['number']));
-                $this->setInfo(array("msg"=>$result,"status"=>0));
             }
-        }else{
-            return ;
+
+            $n2 = count($res);
+            $result = array("query"=>"BE_UPLOADALL_UPLOADS %s / %s","params"=>array($n2,$fileCount));
+            
+            if (count($notresult) > 0) {
+                $result['query'] = $result['query'].' | BE_UPLOADALL_NOT_UPLOADS ';
+                foreach ($notresult as $failedFile) {
+                    $result['query'] .= ' %s';
+                    $result['params'][] = $failedFile;
+                }
+                $this->setInfo(array("status"=>0));
+            }
+            
+            $this->setInfo(array("msg"=>$result));
+            $this->_log(__METHOD__.' - Batch upload completed', 'info');
+            
+            return $res;
+        } catch (\Throwable $e) {
+            $this->_log(__METHOD__.' - Upload batch failed: '.$e->getMessage(), 'error');
+            $this->setInfo(array("status"=>0, "msg"=>array("query"=>"BE_UPLOAD_ERROR", "params"=>[])));
+            return null;
         }
     }
 
@@ -735,31 +807,116 @@ class Filemanager
      * @param string $path
      * @return void
      */
-    public function download($name,$path){
-        $ruta = $this->getFullPath().$path.$name;
-        if( $this->config['debug'] ) $this->_log('$ruta - '.$ruta);
-        if($this->validNameFile($name) && (($this->storage && $this->storage->fileExists($ruta)) || (file_exists($ruta) && is_file($ruta)))){
-            if ($this->storage && $this->storage->fileExists($ruta)) {
-                $stream = $this->storage->readStream($ruta);
-                $contents = '';
-                if (is_resource($stream)) {
-                    while (!feof($stream)) { $contents .= fread($stream, 8192); }
-                    fclose($stream);
-                } else {
-                    $contents = '';
-                }
-                $response = new Response($contents);
-            } else {
-                $response = new Response(file_get_contents($ruta));
-            }
-            $response->headers->set('Content-Type', 'application/octet-stream');
-            $d = $response->headers->makeDisposition(ResponseHeaderBag::DISPOSITION_ATTACHMENT,$name);
-            $response->headers->set('Content-Disposition', $d);
-            $response->send();
-        }else{
+    public function download(?string $name, ?string $path): void
+    {
+        if (!$this->validNameFile($name)) {
+            if($this->config['debug']) $this->_log(__METHOD__.' - Invalid filename: '.$name);
             exit();
-            // return null;
         }
+
+        $fullPath = $this->getFullPath() . $path . $name;
+        
+        $traceId = uniqid('dl_', true);
+        if($this->config['debug']) $this->_log(__METHOD__.' - Download request', 'debug', ['file' => $name, 'path' => $path, 'trace_id' => $traceId]);
+
+        try {
+            // Determine which backend to use
+            $source = $this->determineFileSource($fullPath);
+            if (!$source) {
+                $this->_log(__METHOD__.' - File not found: '.$fullPath, 'warning', ['trace_id' => $traceId]);
+                exit();
+            }
+
+            // Read contents from determined backend
+            $contents = $this->readFileContents($source, $fullPath);
+            
+            // Send response
+            $this->sendDownloadResponse($name, $contents);
+            
+            if($this->config['debug']) $this->_log(__METHOD__.' - Download completed successfully', 'info', ['file' => $name, 'source' => $source, 'trace_id' => $traceId]);
+        } catch (\Throwable $e) {
+            $this->_log(__METHOD__.' - Download failed: '.$e->getMessage(), 'error', ['file' => $name, 'trace_id' => $traceId]);
+            exit();
+        }
+    }
+
+    /**
+     * Determine which filesystem backend contains the file (Task 4)
+     * 
+     * @param string $fullPath Full file path
+     * @return string|null 'storage' if in storage backend, 'local' if local filesystem, null if not found
+     */
+    private function determineFileSource(string $fullPath): ?string
+    {
+        if ($this->storageAvailable && $this->storage && $this->storage->fileExists($fullPath)) {
+            if($this->config['debug']) $this->_log(__METHOD__.' - Using storage backend for: '.$fullPath, 'debug');
+            return 'storage';
+        }
+        
+        if (file_exists($fullPath) && is_file($fullPath)) {
+            if($this->config['debug']) $this->_log(__METHOD__.' - Using local filesystem for: '.$fullPath, 'debug');
+            return 'local';
+        }
+        
+        return null;
+    }
+
+    /**
+     * Read file contents from specified backend (Task 4)
+     * 
+     * @param string $source 'storage' or 'local'
+     * @param string $fullPath Full file path
+     * @return string File contents
+     * @throws \Exception If read fails
+     */
+    private function readFileContents(string $source, string $fullPath): string
+    {
+        if ($source === 'storage') {
+            if (!$this->storageAvailable || !$this->storage) {
+                throw new \Exception('Storage backend unavailable');
+            }
+            
+            $stream = $this->storage->readStream($fullPath);
+            if (!is_resource($stream)) {
+                throw new \Exception('Cannot open storage stream for: '.$fullPath);
+            }
+            
+            $contents = '';
+            while (!feof($stream)) {
+                $contents .= fread($stream, 8192);
+            }
+            fclose($stream);
+            
+            return $contents;
+        }
+        
+        // Local filesystem
+        $contents = @file_get_contents($fullPath);
+        if ($contents === false) {
+            throw new \Exception('Cannot read file: '.$fullPath);
+        }
+        
+        return $contents;
+    }
+
+    /**
+     * Send HTTP download response with proper headers (Task 4)
+     * 
+     * @param string $filename Original filename for download
+     * @param string $contents File contents
+     * @return void
+     */
+    private function sendDownloadResponse(string $filename, string $contents): void
+    {
+        $response = new Response($contents);
+        $response->headers->set('Content-Type', 'application/octet-stream');
+        
+        $disposition = $response->headers->makeDisposition(
+            ResponseHeaderBag::DISPOSITION_ATTACHMENT, 
+            $filename
+        );
+        $response->headers->set('Content-Disposition', $disposition);
+        $response->send();
     }
 
     /**
@@ -847,8 +1004,7 @@ class Filemanager
                     if(is_array($folders))
                         $this->setInfo(array( "data" => $folders ));
                 }elseif($this->action==='uploadfile' ){
-                    // $files = $this->uploadAll($request->files->get('file'),$path);
-                    $files = $this->repository->uploadAll($request->files->get('file'), $path);
+                    $files = $this->uploadAll($request->files->get('file'),$path);
                     if($files)
                         $this->setInfo(array( "data" => $files ));
                 }elseif($this->action==='newfolder'){

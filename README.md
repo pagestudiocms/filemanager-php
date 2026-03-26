@@ -67,16 +67,25 @@ $image->resize(
 );
 ```
 
-#### **FileRepository**
-Facade for file operations: listing, upload, delete, rename, move.
+#### **FileRepository** (Read-Only Data Access Layer)
+Provides read-only data access for file/folder listing and metadata extraction.
+Write operations (upload, delete, rename, move) are delegated to FileOperationHandler.
+Thumbnail operations are delegated to ImageService.
 
 ```php
-$repo = new FileRepository($config, $storage, $imageService);
+// FileRepository is a read-only data access layer
+$repo = new FileRepository($config, $storage, $logger);
+
+// Read-only operations
 $files = $repo->getAllFiles('/folder/');
-$repo->newFolder('new_folder', '/');
-$repo->delete('file.txt', '/folder/');
-$repo->rename('old.txt', 'new.txt', '/');
-$repo->move('file.txt', '/dest/', '/source/');
+$info = $repo->fileInfo($file, '/folder/');
+
+// Write operations are handled by Filemanager and FileOperationHandler
+$filemanager = new Filemanager($config);
+$filemanager->newFolder('new_folder', '/');
+$filemanager->delete('file.txt', '/folder/');
+$filemanager->rename('old.txt', 'new.txt', '/');
+$filemanager->move('file.txt', '/dest/', '/source/');
 ```
 
 ## Installation
